@@ -12,8 +12,33 @@
 #include <http_request.h>
 #include <http_log.h>
 
+#include <apr_strings.h>
+
+#if defined(APLOG_USE_MODULE)
+APLOG_USE_MODULE(reproject);
+#endif
+
+struct sz {
+    apr_int64_t x, y, z, c;
+};
+
+struct rset {
+    // in tiles
+    int width;
+    // in tiles
+    int height;
+};
+
+struct TiledRaster {
+    struct sz size, pagesize;
+    struct rset *rsets;
+    int n_levels;
+};
+
 typedef struct {
-    int a;
+    // http_root path of this configuration
+    const char *doc_path;
+    struct TiledRaster raster, inraster;
 } repro_conf;
 
 extern module AP_MODULE_DECLARE_DATA reproject_module;
