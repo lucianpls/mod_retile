@@ -109,6 +109,15 @@ static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &r
         err_message = get_xyzc_size(&(raster.pagesize), line);
         if (err_message) return apr_pstrcat(p, "PageSize ", err_message, NULL);
     }
+
+    line = apr_table_get(kvp, "SkippedLevels");
+    if (line)
+        raster.skip = apr_atoi64(line);
+
+    // Default projection is WM, meaning web mercator
+    line = apr_table_get(kvp, "Projection");
+    raster.projection = line ? apr_pstrdup(p, line) : "WM";
+
     init_rsets(p, raster);
     return NULL;
 }
@@ -124,11 +133,13 @@ static const char *read_config(cmd_parms *cmd, repro_conf *conf, const char *src
     err_message = ConfigRaster(cmd->pool, kvp, conf->inraster);
     if (err_message) return apr_pstrcat(cmd->pool, "Source ", err_message, NULL);
 
-    // Then handle the output configuration file
+    // Then read the output configuration file
     kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
     if (NULL == kvp) return err_message;
     err_message = ConfigRaster(cmd->pool, kvp, conf->raster);
     if (err_message) return err_message;
+
+    // Final consistency checks
 
     return NULL;
 }
@@ -145,7 +156,7 @@ static const command_rec cmds[] =
     (cmd_func) read_config, // Callback
     0, // Self-pass argument
     ACCESS_CONF, // availability
-    "The configuration files for this module, first the source then the output"
+    "source then output configuration files"
     ),
 
     { NULL }

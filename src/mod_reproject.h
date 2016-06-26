@@ -30,9 +30,16 @@ struct rset {
 };
 
 struct TiledRaster {
+    // Size and pagesize of the raster
     struct sz size, pagesize;
+    // width and height for each pyramid level
     struct rset *rsets;
+    // how many levels from full size, computed
     int n_levels;
+    // How many levels to skip at the top of the pyramid
+    int skip;
+    // geographical projection
+    char *projection;
 };
 
 typedef struct {
