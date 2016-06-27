@@ -59,7 +59,8 @@ static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, cha
 
     ap_cfg_closefile(cfg_file);
     if (s == APR_ENOSPC) {
-        *err_message = apr_psprintf(pool, "%s lines should be smaller than %d", fname, MAX_STRING_LEN);
+        *err_message = apr_psprintf(pool, "%s lines should be smaller than %d",
+            fname, MAX_STRING_LEN);
         return NULL;
     }
 
@@ -122,32 +123,98 @@ static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &r
     return NULL;
 }
 
-static const char *read_config(cmd_parms *cmd, repro_conf *conf, const char *src, const char *fname)
+static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
 {
     char *err_message;
 
-    // Start with the source
+    // Start with the source configuration
     apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
     if (NULL == kvp) return err_message;
 
-    err_message = ConfigRaster(cmd->pool, kvp, conf->inraster);
+    err_message = ConfigRaster(cmd->pool, kvp, c->inraster);
     if (err_message) return apr_pstrcat(cmd->pool, "Source ", err_message, NULL);
 
-    // Then read the output configuration file
+    // Then the real configuration file
     kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
     if (NULL == kvp) return err_message;
-    err_message = ConfigRaster(cmd->pool, kvp, conf->raster);
+    err_message = ConfigRaster(cmd->pool, kvp, c->raster);
     if (err_message) return err_message;
 
-    // Final consistency checks
+    // Allow for one or more RegExp guard
+    // One of them has to match if the request is to be considered
+    const char *line = apr_table_get(kvp, "RegExp");
+    if (line) {
+        if (c->regexp == 0)
+            c->regexp = apr_array_make(cmd->pool, 2, sizeof(ap_regex_t));
+        ap_regex_t *m = (ap_regex_t *)apr_array_push(c->regexp);
+        int error = ap_regcomp(m, line, 0);
+        if (error) {
+            int msize = 2048;
+            err_message = (char *)apr_pcalloc(cmd->pool, msize);
+            ap_regerror(error, m, err_message, msize);
+            return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message);
+        }
+    }
 
     return NULL;
 }
 
+//
+// Tokenize a string into an array
+//  
+static apr_array_header_t* tokenize(apr_pool_t *p, const char *s, char sep = '/')
+{
+    apr_array_header_t* arr = apr_array_make(p, 10, sizeof(char *));
+    while (sep == *s) s++;
+    char *val;
+    while (*s && (val = ap_getword(p, &s, sep))) {
+        char **newelt = (char **)apr_array_push(arr);
+        *newelt = val;
+    }
+    return arr;
+}
+
+#define REQ_ERR_IF(X) if (X) {\
+    return HTTP_BAD_REQUEST; \
+}
+
 static int handler(request_rec *r)
 {
+    if (r->method_number != M_GET) return DECLINED;
+    if (r->args) return DECLINED; // Don't accept arguments
+
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+
+    if (cfg->regexp) { // Check the guard regexps if they exist, matches agains URL
+        int i;
+        char * url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
+        for (i = 0; i < cfg->regexp->nelts; i++) {
+            ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
+            if (ap_regexec(m, url_to_match, 0, NULL, 0)) continue; // Not matched
+            break;
+        }
+        if (i == cfg->regexp->nelts) // No match found
+            return DECLINED;
+    }
+
+    apr_array_header_t *tokens = tokenize(r->pool, r->uri);
+    if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
+
+    // Use a xyzc structure, with c being the level
+    // Input order is M/Level/Row/Column, with M being optional
+    sz tile;
+    memset(&tile, 0, sizeof(tile));
+
+    // Need at least three numerical arguments
+    tile.x = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
+    tile.y = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
+    tile.c = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
+
+    // TODO: Handler
     return DECLINED;
 }
+
+#undef REQ_ERR_IF
 
 static const command_rec cmds[] =
 {

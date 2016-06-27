@@ -23,10 +23,7 @@ struct sz {
 };
 
 struct rset {
-    // in tiles
-    int width;
-    // in tiles
-    int height;
+    int width, height; // In tiles
 };
 
 struct TiledRaster {
@@ -38,6 +35,7 @@ struct TiledRaster {
     int n_levels;
     // How many levels to skip at the top of the pyramid
     int skip;
+
     // geographical projection
     char *projection;
 };
@@ -45,6 +43,9 @@ struct TiledRaster {
 typedef struct {
     // http_root path of this configuration
     const char *doc_path;
+    // array of guard regexp, one of them has to match
+    apr_array_header_t *regexp;
+
     struct TiledRaster raster, inraster;
 } repro_conf;
 
