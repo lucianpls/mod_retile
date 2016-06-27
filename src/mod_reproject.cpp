@@ -38,27 +38,21 @@ static void uint64tobase32(apr_uint64_t value, char *buffer, int flag = 0) {
 // Return the value from a base 32 character
 // Returns a negative value if char is not a valid base32 char
 static int b32(unsigned char c) {
-    if (c - '0' <  0) return -1;
+    if (c < '0') return -1;
     if (c - '0' < 10) return c - '0';
-    if (c - 'A' <  0) return -1;
+    if (c < 'A') return -1;
     if (c - 'A' < 22) return c - 'A' + 10;
-    if (c - 'a' <  0) return -1;
+    if (c < 'a') return -1;
     if (c - 'a' < 22) return c - 'a' + 10;
     return -1;
 }
 
 static apr_uint64_t base32decode(unsigned char *s, int *flag) {
     apr_int64_t value = 0;
-    if (*s == '"') s++; // Skip initial quotes
-    // first char carries the flag
-    int v = b32(*s++);
-    *flag = v >> 4; // pick up the flag
-    value = v & 0xf; // Only 4 bits
-    for (; *s != 0; s++) {
-        v = b32(*s);
-        if (v < 0) break; // Stop at first non base 32 char
+    while (*s == '"') s++; // Skip initial quotes
+    *flag = (b32(*s) >> 4 ) & 1; // Pick up the flag from bit 5
+    for (int v = b32(*s++) & 0xf; v >= 0; v = b32(*s++))
         value = (value << 5) + v;
-    }
     return value;
 }
 
