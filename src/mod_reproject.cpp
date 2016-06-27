@@ -25,6 +25,43 @@ static char *get_xyzc_size(struct sz *size, const char *value) {
     return NULL;
 }
 
+// Converts a 64bit value into 13 trigesimal chars
+static void uint64tobase32(apr_uint64_t value, char *buffer, int flag = 0) {
+    static char b32digits[] = "0123456789abcdefghijklmnopqrstuv";
+    // From the bottom up
+    buffer[13] = 0; // End of string marker
+    for (int i = 0; i < 13; i++, value >>= 5)
+        buffer[12 - i] = b32digits[value & 0x1f];
+    buffer[0] |= flag << 4; // empty flag goes in top bit
+}
+
+// Return the value from a base 32 character
+// Returns a negative value if char is not a valid base32 char
+static int b32(unsigned char c) {
+    if (c - '0' <  0) return -1;
+    if (c - '0' < 10) return c - '0';
+    if (c - 'A' <  0) return -1;
+    if (c - 'A' < 22) return c - 'A' + 10;
+    if (c - 'a' <  0) return -1;
+    if (c - 'a' < 22) return c - 'a' + 10;
+    return -1;
+}
+
+static apr_uint64_t base32decode(unsigned char *s, int *flag) {
+    apr_int64_t value = 0;
+    if (*s == '"') s++; // Skip initial quotes
+    // first char carries the flag
+    int v = b32(*s++);
+    *flag = v >> 4; // pick up the flag
+    value = v & 0xf; // Only 4 bits
+    for (; *s != 0; s++) {
+        v = b32(*s);
+        if (v < 0) break; // Stop at first non base 32 char
+        value = (value << 5) + v;
+    }
+    return value;
+}
+
 static void *create_dir_config(apr_pool_t *p, char *path)
 {
     repro_conf *c = (repro_conf *)apr_pcalloc(p, sizeof(repro_conf));
@@ -123,9 +160,52 @@ static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &r
     return NULL;
 }
 
+static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
+{
+    // If we're provided a file name or a size, pre-read the empty tile in the 
+    apr_file_t *efile;
+    apr_off_t offset = c->eoffset;
+    apr_status_t stat;
+    char *message;
+
+    char *last, *efname;
+    c->esize = apr_strtoi64(line, &last, 0);
+    // Might be an offset, or offset then file name
+    if (last != line)
+        apr_strtoff(&(c->eoffset), last, &last, 0);
+    // If there is anything left, it's the file name
+    if (*last != 0)
+        efname = last;
+    message = read_empty_tile(cmd, c, efname);
+    if (message) return message;
+
+    // Use the temp pool for the file open, it will close it for us
+    if (!c->esize) { // Don't know the size, get it from the file
+        apr_finfo_t finfo;
+        stat = apr_stat(&finfo, efname, APR_FINFO_CSIZE, cmd->temp_pool);
+        if (APR_SUCCESS != stat)
+            return apr_psprintf(cmd->pool, "Can't stat %s %pm", efname, stat);
+        c->esize = (apr_uint64_t)finfo.csize;
+    }
+    stat = apr_file_open(&efile, efname, READ_RIGHTS, 0, cmd->temp_pool);
+    if (APR_SUCCESS != stat)
+        return apr_psprintf(cmd->pool, "Can't open empty file %s, %pm", efname, stat);
+    c->empty = (apr_uint32_t *)apr_palloc(cmd->pool, c->esize);
+    stat = apr_file_seek(efile, APR_SET, &offset);
+    if (APR_SUCCESS != stat)
+        return apr_psprintf(cmd->pool, "Can't seek empty tile %s: %pm", efname, stat);
+    apr_size_t size = (apr_size_t)c->esize;
+    stat = apr_file_read(efile, c->empty, &size);
+    if (APR_SUCCESS != stat)
+        return apr_psprintf(cmd->pool, "Can't read from %s: %pm", efname, stat);
+    apr_file_close(efile);
+    return NULL;
+}
+
 static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
 {
     char *err_message;
+    const char *line;
 
     // Start with the source configuration
     apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
@@ -140,9 +220,13 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     err_message = ConfigRaster(cmd->pool, kvp, c->raster);
     if (err_message) return err_message;
 
+    // Output mime type
+    line = apr_table_get(kvp, "MimeType");
+    c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
+
     // Allow for one or more RegExp guard
     // One of them has to match if the request is to be considered
-    const char *line = apr_table_get(kvp, "RegExp");
+    line = apr_table_get(kvp, "RegExp");
     if (line) {
         if (c->regexp == 0)
             c->regexp = apr_array_make(cmd->pool, 2, sizeof(ap_regex_t));
@@ -154,6 +238,20 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
             ap_regerror(error, m, err_message, msize);
             return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message);
         }
+    }
+
+    line = apr_table_get(kvp, "ETagSeed");
+    // Ignore the flag
+    int flag;
+    c->seed = line ? base32decode((unsigned char *)line, &flag) : 0;
+    // Set the missing tile etag, with the extra bit set
+    uint64tobase32(c->seed, c->eETag, 1);
+
+    // EmptyTile, default to nothing
+    line = apr_table_get(kvp, "EmptyTile");
+    if (line) {
+        err_message = read_empty_tile(cmd, c, line);
+        if (err_message) return err_message;
     }
 
     return NULL;
@@ -172,6 +270,49 @@ static apr_array_header_t* tokenize(apr_pool_t *p, const char *s, char sep = '/'
         *newelt = val;
     }
     return arr;
+}
+
+static int etag_matches(request_rec *r, const char *ETag) {
+    const char *ETagIn = apr_table_get(r->headers_in, "If-None-Match");
+    return ETagIn != 0 && strstr(ETagIn, ETag);
+}
+
+static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size)
+{
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    if (cfg->mime_type)
+        ap_set_content_type(r, cfg->mime_type);
+    else
+        switch (hton32(*buffer)) {
+        case JPEG_SIG:
+            ap_set_content_type(r, "image/jpeg");
+            break;
+        case PNG_SIG:
+            ap_set_content_type(r, "image/png");
+            break;
+        default: // LERC goes here too
+            ap_set_content_type(r, "application/octet-stream");
+    }
+    // Is it gzipped content?
+    if (GZIP_SIG == hton32(*buffer))
+        apr_table_setn(r->headers_out, "Content-Encoding", "gzip");
+
+    // TODO: Set headers, as chosen by user
+    ap_set_content_length(r, size);
+    ap_rwrite(buffer, size, r);
+    return OK;
+}
+
+// Returns the empty tile if defined
+static int send_empty_tile(request_rec *r) {
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    if (etag_matches(r, cfg->eETag)) {
+        apr_table_setn(r->headers_out, "ETag", cfg->eETag);
+        return HTTP_NOT_MODIFIED;
+    }
+
+    if (!cfg->empty) return DECLINED;
+    return send_image(r, cfg->empty, cfg->esize);
 }
 
 #define REQ_ERR_IF(X) if (X) {\
@@ -210,7 +351,16 @@ static int handler(request_rec *r)
     tile.y = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
     tile.c = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
 
-    // TODO: Handler
+    // We can ignore the error on this one, defaults to zero
+    // The parameter before the level can't start with a digit for an extra-dimensional MRF
+    if (cfg->raster.size.z != 1 && tokens->nelts)
+        tile.z = apr_atoi64(*(char **)apr_array_pop(tokens));
+
+    // Don't allow access to levels less than zero, send the empty tile instead
+    if (tile.c < 0)
+        return send_empty_tile(r);
+
+    // TODO: Rest of the handler
     return DECLINED;
 }
 
