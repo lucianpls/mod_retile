@@ -37,6 +37,7 @@ static void uint64tobase32(apr_uint64_t value, char *buffer, int flag = 0) {
 
 // Return the value from a base 32 character
 // Returns a negative value if char is not a valid base32 char
+// ASCII only
 static int b32(unsigned char c) {
     if (c < '0') return -1;
     if (c - '0' < 10) return c - '0';
@@ -105,8 +106,8 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
     raster.pagesize.z = 1;
 
     struct rset level;
-    level.width = 1 + (raster.size.x - 1) / raster.pagesize.x;
-    level.height = 1 + (raster.size.y - 1) / raster.pagesize.y;
+    level.width = int(1 + (raster.size.x - 1) / raster.pagesize.x);
+    level.height = int(1 + (raster.size.y - 1) / raster.pagesize.y);
     // How many levels do we have
     raster.n_levels = 2 + ilogb(max(level.height, level.width) - 1);
     raster.rsets = (struct rset *)apr_pcalloc(p, sizeof(rset) * raster.n_levels);
@@ -144,7 +145,7 @@ static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &r
 
     line = apr_table_get(kvp, "SkippedLevels");
     if (line)
-        raster.skip = apr_atoi64(line);
+        raster.skip = int(apr_atoi64(line));
 
     // Default projection is WM, meaning web mercator
     line = apr_table_get(kvp, "Projection");
@@ -160,18 +161,15 @@ static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
     apr_file_t *efile;
     apr_off_t offset = c->eoffset;
     apr_status_t stat;
-    char *message;
+    char *last;
 
-    char *last, *efname;
-    c->esize = apr_strtoi64(line, &last, 0);
+    c->esize = (apr_size_t)apr_strtoi64(line, &last, 0);
     // Might be an offset, or offset then file name
     if (last != line)
         apr_strtoff(&(c->eoffset), last, &last, 0);
-    // If there is anything left, it's the file name
-    if (*last != 0)
-        efname = last;
-    message = read_empty_tile(cmd, c, efname);
-    if (message) return message;
+    
+    while (*last && isblank(*last)) last++;
+    const char *efname = last;
 
     // Use the temp pool for the file open, it will close it for us
     if (!c->esize) { // Don't know the size, get it from the file
@@ -179,12 +177,12 @@ static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
         stat = apr_stat(&finfo, efname, APR_FINFO_CSIZE, cmd->temp_pool);
         if (APR_SUCCESS != stat)
             return apr_psprintf(cmd->pool, "Can't stat %s %pm", efname, stat);
-        c->esize = (apr_uint64_t)finfo.csize;
+        c->esize = (apr_size_t)finfo.csize;
     }
     stat = apr_file_open(&efile, efname, READ_RIGHTS, 0, cmd->temp_pool);
     if (APR_SUCCESS != stat)
         return apr_psprintf(cmd->pool, "Can't open empty file %s, %pm", efname, stat);
-    c->empty = (apr_uint32_t *)apr_palloc(cmd->pool, c->esize);
+    c->empty = (apr_uint32_t *)apr_palloc(cmd->pool, (apr_size_t)c->esize);
     stat = apr_file_seek(efile, APR_SET, &offset);
     if (APR_SUCCESS != stat)
         return apr_psprintf(cmd->pool, "Can't seek empty tile %s: %pm", efname, stat);
@@ -313,6 +311,12 @@ static int send_empty_tile(request_rec *r) {
     return HTTP_BAD_REQUEST; \
 }
 
+#define IS_AFFINE_SCALING(cfg) apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
+
+static int affine_scaling(request_rec *r, sz *tile) {
+    return DECLINED;
+}
+
 static int handler(request_rec *r)
 {
     if (r->method_number != M_GET) return DECLINED;
@@ -355,6 +359,9 @@ static int handler(request_rec *r)
         return send_empty_tile(r);
 
     // TODO: Rest of the handler
+    if (IS_AFFINE_SCALING(cfg))
+        return affine_scaling(r, &tile);
+
     return DECLINED;
 }
 
