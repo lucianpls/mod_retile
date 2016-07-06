@@ -49,13 +49,14 @@
 APLOG_USE_MODULE(reproject);
 #endif
 
+// Separate channels and level, just in case
 struct sz {
-    apr_int64_t x, y, z, c;
+    apr_int64_t x, y, z, c, l;
 };
 
-typedef struct {
+struct bbox_t {
     double xmin, ymin, xmax, ymax;
-} bbox_t;
+};
 
 struct rset {
     // Resolution in units per pixel
@@ -78,9 +79,9 @@ struct TiledRaster {
     bbox_t bbox;
 };
 
-typedef struct {
+struct  repro_conf {
     // The output and input raster figures
-    struct TiledRaster raster, inraster;
+    TiledRaster raster, inraster;
 
     // http_root path of this configuration
     const char *doc_path;
@@ -101,7 +102,7 @@ typedef struct {
 
     // Choose a lower res input instead of a higher one
     int undersample;
-} repro_conf;
+};
 
 extern module AP_MODULE_DECLARE_DATA reproject_module;
 

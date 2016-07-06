@@ -1,7 +1,7 @@
 /*
-*
-*
-*/
+ *
+ *
+ */
 
 #include "mod_reproject.h"
 #include <cmath>
@@ -125,7 +125,7 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
         // Prepare for the next level, assuming powers of two
         level.width = 1 + (level.width - 1) / 2;
         level.height = 1 + (level.height - 1) / 2;
-        level.resolution /= 2;
+        level.resolution *= 2;
     }
 
     // MRF has one tile at the top
@@ -133,7 +133,7 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
     ap_assert(raster.n_levels > raster.skip);
 }
 
-// Temporary switch locale to C, get four comma separated numbers in a bounding box
+// Temporary switch locale to C, get four comma separated numbers in a bounding box, WMS style
 static char *getbbox(const char *line, bbox_t *bbox)
 {
     const char *lcl = setlocale(LC_NUMERIC, NULL);
@@ -358,32 +358,76 @@ static int input_level(struct TiledRaster &raster, double res, int under) {
     // The raster levels are in increasing resolution order, test until 
     for (int choice = raster.skip; choice < raster.n_levels; choice++) {
         double cres = raster.rsets[choice].resolution;
-        cres += cres / raster.pagesize.c / 2; // Add half pixel worth to avoid jitter noise
-        if (cres > res) { // This is the best choice, we will return
-            if (under) choice -= 1; // Go to the level above;
+        cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to avoid jitter noise
+        if (cres < res) { // This is the best choice, we will return
+            if (under) choice -= 1; // Use the lower resolution if undersampling
             if (choice < raster.skip)
                 return raster.skip;
             return choice;
         }
     }
-    // Use the bottom, highest resolution level
+    // If we didn't make a choice yet, use the highest resolution input
     return raster.n_levels -1;
+}
+
+// From a tile location, generate a bounding box of a raster
+static void tile_to_bbox(const TiledRaster &raster, const sz *tile, bbox_t &bb) {
+    double resolution = raster.rsets[tile->l].resolution;
+    // Compute the top left
+    bb.xmin = raster.bbox.xmin + tile->x * resolution * raster.pagesize.x;
+    bb.ymax = raster.bbox.ymax - tile->y * resolution * raster.pagesize.y;
+    // Adjust for the bottom right
+    bb.xmax = bb.xmin + resolution * raster.pagesize.x;
+    bb.ymin = bb.ymax - resolution * raster.pagesize.y;
+}
+
+// From a bounding box, calculate the top-left and bottom-right tiles of a specific level of a raster
+// Input level is absolute, the one set in output tiles is relative
+static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz *tl_tile, sz *br_tile) {
+    double resolution = raster.rsets[level].resolution;
+    double x = (bb.xmin - raster.bbox.xmin) / (resolution * raster.pagesize.x);
+    double y = (raster.bbox.ymax - bb.ymax) / (resolution * raster.pagesize.y);
+
+    // Truncate is fine for these two, after adding quarter pixel to eliminate jitter
+    tl_tile->x = int(x + resolution / 4);
+    tl_tile->y = int(y + resolution / 4);
+
+    x = (bb.xmax - raster.bbox.xmin) / (resolution * raster.pagesize.x);
+    y = (raster.bbox.ymax - bb.ymin) / (resolution * raster.pagesize.y);
+
+    // Pad these quarter pixel to avoid jitter
+    br_tile->x = int(x + resolution / 4);
+    br_tile->y = int(y + resolution / 4);
+    if (x - br_tile->x > resolution / 2) br_tile->x++;
+    if (y - br_tile->y > resolution / 2) br_tile->y++;
 }
 
 // Projection is not changed
 // TODO: deal with affine scaling
 static int affine_scaling_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    double out_res = cfg->raster.rsets[tile->c].resolution;
+    double out_res = cfg->raster.rsets[tile->l].resolution;
 
     // The absolute input level
     int input_l = input_level(cfg->inraster, out_res, cfg->undersample);
+
+    // Compute the output tile bounding box
+    bbox_t bbox;
+    sz tl_tile, br_tile;
+
+    // Convert output tile to bbox, then to input tile range
+    tile_to_bbox(cfg->raster, tile, bbox);  
+    bbox_to_tile(cfg->inraster, input_l, bbox, &tl_tile, &br_tile);
+
+    // Complete the setup, pass the z and adjust the level
+    tl_tile.z = tl_tile.z = tile->z;
+    tl_tile.l = tl_tile.l = input_l - cfg->inraster.skip;
 
     return DECLINED;
 }
 
 // If projection is the same, the transformation is an affine scaling
-#define IS_AFFINE_SCALING(cfg) apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
+#define IS_AFFINE_SCALING(cfg) !apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
 
 static int handler(request_rec *r)
 {
@@ -397,8 +441,7 @@ static int handler(request_rec *r)
         char * url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
         for (i = 0; i < cfg->regexp->nelts; i++) {
             ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
-            if (ap_regexec(m, url_to_match, 0, NULL, 0)) continue; // Not matched
-            break;
+            if (!ap_regexec(m, url_to_match, 0, NULL, 0)) break; // Found
         }
         if (i == cfg->regexp->nelts) // No match found
             return DECLINED;
@@ -409,13 +452,13 @@ static int handler(request_rec *r)
 
     // Use a xyzc structure, with c being the level
     // Input order is M/Level/Row/Column, with M being optional
-    sz tile;
+    struct sz tile;
     memset(&tile, 0, sizeof(tile));
 
     // Need at least three numerical arguments
     tile.x = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
     tile.y = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
-    tile.c = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
+    tile.l = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
 
     // We can ignore the error on this one, defaults to zero
     // The parameter before the level can't start with a digit for an extra-dimensional MRF
@@ -423,11 +466,11 @@ static int handler(request_rec *r)
         tile.z = apr_atoi64(*(char **)apr_array_pop(tokens));
 
     // Don't allow access to levels less than zero, send the empty tile instead
-    if (tile.c < 0)
+    if (tile.l < 0)
         return send_empty_tile(r);
 
     // Adjust the level to what the input is
-    tile.c += cfg->raster.skip;
+    tile.l += cfg->raster.skip;
 
     if (IS_AFFINE_SCALING(cfg))
         return affine_scaling_handler(r, &tile);
