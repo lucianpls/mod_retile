@@ -53,7 +53,13 @@ struct sz {
     apr_int64_t x, y, z, c;
 };
 
+typedef struct {
+    double xmin, ymin, xmax, ymax;
+} bbox_t;
+
 struct rset {
+    // Resolution in units per pixel
+    double resolution;
     int width, height; // In tiles
 };
 
@@ -69,6 +75,7 @@ struct TiledRaster {
 
     // geographical projection
     char *projection;
+    bbox_t bbox;
 };
 
 typedef struct {
@@ -92,6 +99,8 @@ typedef struct {
     apr_size_t esize;
     apr_off_t eoffset;
 
+    // Choose a lower res input instead of a higher one
+    int undersample;
 } repro_conf;
 
 extern module AP_MODULE_DECLARE_DATA reproject_module;

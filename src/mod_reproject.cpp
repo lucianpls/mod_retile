@@ -5,12 +5,15 @@
 
 #include "mod_reproject.h"
 #include <cmath>
+#include <clocale>
+
+using namespace std;
 
 // Returns NULL if it worked as expected, returns a four integer value from "x y", "x y z" or "x y z c"
 static char *get_xyzc_size(struct sz *size, const char *value) {
     char *s;
     if (!value)
-        return "values missing";
+        return " values missing";
     size->x = apr_strtoi64(value, &s, 0);
     size->y = apr_strtoi64(s, &s, 0);
     size->c = 3;
@@ -21,7 +24,7 @@ static char *get_xyzc_size(struct sz *size, const char *value) {
             size->c = apr_strtoi64(s, &s, 0);
     } // Raster size is 4 params max
     if (errno || *s)
-        return "incorrect format";
+        return " incorrect format";
     return NULL;
 }
 
@@ -74,7 +77,7 @@ static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, cha
     apr_status_t s = ap_pcfg_openfile(&cfg_file, pool, fname);
 
     if (APR_SUCCESS != s) { // %pm means print status error string
-        *err_message = apr_psprintf(pool, "%s - %pm", fname, &s);
+        *err_message = apr_psprintf(pool, " %s - %pm", fname, &s);
         return NULL;
     }
 
@@ -91,7 +94,7 @@ static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, cha
 
     ap_cfg_closefile(cfg_file);
     if (s == APR_ENOSPC) {
-        *err_message = apr_psprintf(pool, "%s lines should be smaller than %d",
+        *err_message = apr_psprintf(pool, " %s lines should be smaller than %d",
             fname, MAX_STRING_LEN);
         return NULL;
     }
@@ -108,6 +111,8 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
     struct rset level;
     level.width = int(1 + (raster.size.x - 1) / raster.pagesize.x);
     level.height = int(1 + (raster.size.y - 1) / raster.pagesize.y);
+    level.resolution = (raster.bbox.xmax - raster.bbox.xmin) / raster.size.x;
+
     // How many levels do we have
     raster.n_levels = 2 + ilogb(max(level.height, level.width) - 1);
     raster.rsets = (struct rset *)apr_pcalloc(p, sizeof(rset) * raster.n_levels);
@@ -120,11 +125,34 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
         // Prepare for the next level, assuming powers of two
         level.width = 1 + (level.width - 1) / 2;
         level.height = 1 + (level.height - 1) / 2;
+        level.resolution /= 2;
     }
 
     // MRF has one tile at the top
     ap_assert(raster.rsets[0].height == 1 && raster.rsets[0].width == 1);
+    ap_assert(raster.n_levels > raster.skip);
 }
+
+// Temporary switch locale to C, get four comma separated numbers in a bounding box
+static char *getbbox(const char *line, bbox_t *bbox)
+{
+    const char *lcl = setlocale(LC_NUMERIC, NULL);
+    char *message = " format incorrect, expects four comma separated C locale numbers";
+    char *l;
+    setlocale(LC_NUMERIC, "C");
+
+    do {
+        bbox->xmin = strtod(line, &l); if (*l++ != ',') break;
+        bbox->ymin = strtod(l, &l);    if (*l++ != ',') break;
+        bbox->xmax = strtod(l, &l);    if (*l++ != ',') break;
+        bbox->ymax = strtod(l, &l);
+        message = NULL;
+    } while (false);
+
+    setlocale(LC_NUMERIC, lcl);
+    return message;
+}
+
 
 static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &raster)
 {
@@ -134,13 +162,13 @@ static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &r
         return "Size directive is mandatory";
     const char *err_message;
     err_message = get_xyzc_size(&(raster.size), line);
-    if (err_message) return apr_pstrcat(p, "Size ", err_message, NULL);
+    if (err_message) return apr_pstrcat(p, "Size", err_message, NULL);
     // Optional page size, defaults to 512x512
     raster.pagesize.x = raster.pagesize.y = 512;
     line = apr_table_get(kvp, "PageSize");
     if (line) {
         err_message = get_xyzc_size(&(raster.pagesize), line);
-        if (err_message) return apr_pstrcat(p, "PageSize ", err_message, NULL);
+        if (err_message) return apr_pstrcat(p, "PageSize", err_message, NULL);
     }
 
     line = apr_table_get(kvp, "SkippedLevels");
@@ -151,7 +179,17 @@ static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &r
     line = apr_table_get(kvp, "Projection");
     raster.projection = line ? apr_pstrdup(p, line) : "WM";
 
+    // Bounding box: minx, miny, maxx, maxy
+    raster.bbox.xmin = raster.bbox.ymin = 0.0;
+    raster.bbox.xmax = raster.bbox.ymax = 1.0;
+    line = apr_table_get(kvp, "BoundingBox");
+    if (line)
+        err_message = getbbox(line, &raster.bbox);
+    if (err_message)
+        return apr_pstrcat(p, "BoundingBox", err_message, NULL);
+
     init_rsets(p, raster);
+
     return NULL;
 }
 
@@ -215,6 +253,10 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     // Output mime type
     line = apr_table_get(kvp, "MimeType");
     c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
+
+    // Undersample flag
+    line = apr_table_get(kvp, "Undersample");
+    c->undersample = (line != NULL);
 
     // Allow for one or more RegExp guard
     // One of them has to match if the request is to be considered
@@ -311,11 +353,37 @@ static int send_empty_tile(request_rec *r) {
     return HTTP_BAD_REQUEST; \
 }
 
-#define IS_AFFINE_SCALING(cfg) apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
+// Pick an input level based on desired output resolution
+static int input_level(struct TiledRaster &raster, double res, int under) {
+    // The raster levels are in increasing resolution order, test until 
+    for (int choice = raster.skip; choice < raster.n_levels; choice++) {
+        double cres = raster.rsets[choice].resolution;
+        cres += cres / raster.pagesize.c / 2; // Add half pixel worth to avoid jitter noise
+        if (cres > res) { // This is the best choice, we will return
+            if (under) choice -= 1; // Go to the level above;
+            if (choice < raster.skip)
+                return raster.skip;
+            return choice;
+        }
+    }
+    // Use the bottom, highest resolution level
+    return raster.n_levels -1;
+}
 
-static int affine_scaling(request_rec *r, sz *tile) {
+// Projection is not changed
+// TODO: deal with affine scaling
+static int affine_scaling_handler(request_rec *r, sz *tile) {
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    double out_res = cfg->raster.rsets[tile->c].resolution;
+
+    // The absolute input level
+    int input_l = input_level(cfg->inraster, out_res, cfg->undersample);
+
     return DECLINED;
 }
+
+// If projection is the same, the transformation is an affine scaling
+#define IS_AFFINE_SCALING(cfg) apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
 
 static int handler(request_rec *r)
 {
@@ -358,10 +426,13 @@ static int handler(request_rec *r)
     if (tile.c < 0)
         return send_empty_tile(r);
 
-    // TODO: Rest of the handler
-    if (IS_AFFINE_SCALING(cfg))
-        return affine_scaling(r, &tile);
+    // Adjust the level to what the input is
+    tile.c += cfg->raster.skip;
 
+    if (IS_AFFINE_SCALING(cfg))
+        return affine_scaling_handler(r, &tile);
+
+    // TODO: Rest of the handler
     return DECLINED;
 }
 
