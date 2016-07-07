@@ -7,7 +7,12 @@
 #include <cmath>
 #include <clocale>
 
+// From mod_receive
+#include <receive_context.h>
+
 using namespace std;
+
+#define USER_AGENT "AHTSE Reproject"
 
 // Returns NULL if it worked as expected, returns a four integer value from "x y", "x y z" or "x y z c"
 static char *get_xyzc_size(struct sz *size, const char *value) {
@@ -288,6 +293,18 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
         if (err_message) return err_message;
     }
 
+    line = apr_table_get(kvp, "InputBufferSize");
+    c->max_input_size = DEFAULT_INPUT_SIZE;
+    if (line) 
+        c->max_input_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
+
+    line = apr_table_get(kvp, "SourcePath");
+    if (!line)
+        return "SourcePath directive is missing";
+    c->source = apr_pstrdup(cmd->pool, line);
+
+    // Enabled if we got this far
+    c->enabled = TRUE;
     return NULL;
 }
 
@@ -353,6 +370,12 @@ static int send_empty_tile(request_rec *r) {
     return HTTP_BAD_REQUEST; \
 }
 
+// Logs the message as error and returns HTTP ERROR
+#define SERR_IF(X, msg) if (X) { \
+    ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, msg);\
+    return HTTP_INTERNAL_SERVER_ERROR; \
+}
+
 // Pick an input level based on desired output resolution
 static int input_level(struct TiledRaster &raster, double res, int under) {
     // The raster levels are in increasing resolution order, test until 
@@ -402,6 +425,79 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
     if (y - br_tile->y > resolution / 2) br_tile->y++;
 }
 
+
+// Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
+static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br, void **buffer)
+{
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+
+    int ntiles = int((br.x - tl.x) * (tl.y - br.y));
+    // Should have a reasonable number of input tiles, 64 is a good figure
+    SERR_IF(ntiles > 0 && ntiles < 65, "Too many input tiles required, maximum is 64");
+
+    // Allocate a buffer for receiving responses
+    receive_ctx rctx;
+    rctx.maxsize = cfg->max_input_size;
+    rctx.buffer = (char *)apr_palloc(r->pool, rctx.maxsize);
+
+    ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, NULL);
+
+    // Assume data type is byte for now, raster->pagesize.c has to be set correctly
+    int pagesize = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.y * cfg->raster.pagesize.c);
+    apr_size_t bufsize = pagesize * ntiles;
+
+    // And a buffer for the output, black background by default
+    *buffer = apr_pcalloc(r->pool, bufsize);
+    int input_line_width = int(cfg->raster.pagesize.c * cfg->raster.pagesize.x);
+    int line_stride = int((br.x - tl.x) * input_line_width);
+
+    const char *error_message;
+
+    // Retrieve every required tile and decompress it in the right place
+    for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
+        char *sub_uri = (tl.z == 0) ?
+            apr_psprintf(r->pool, "%s/%d/%d/%d", cfg->source, tl.l, y, x) :
+            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, tl.z, tl.l, y, x);
+        request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
+
+        void *b = (char *)(*buffer) + input_line_width * (x - tl.x);
+
+        // Set up user agent signature, prepend the info
+        const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
+        user_agent = user_agent == NULL ? USER_AGENT :
+            apr_pstrcat(r->pool, USER_AGENT ", ", user_agent, NULL);
+        apr_table_setn(rr->headers_in, "User-Agent", user_agent);
+
+        rctx.size = 0; // Reset the receive size
+        int rr_status = ap_run_sub_req(rr);
+        if (rr_status != APR_SUCCESS || rr->status != HTTP_OK) {
+            ap_remove_output_filter(rf);
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri, rr->status);
+            return HTTP_SERVICE_UNAVAILABLE;
+        }
+
+        apr_uint32_t sig;
+        memcpy(&sig, *buffer, sizeof(sig));
+
+        switch (hton32(sig))
+        {
+        case JPEG_SIG:
+            error_message = jpeg_stride_decode(cfg->inraster, (storage_manager &)(rctx), b, line_stride);
+            break;
+        default: // This will leave the output unchanged
+            error_message = "Unsupported format";
+        }
+
+        if (error_message != NULL) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, sub_uri);
+            // Something went wrong
+            return HTTP_NOT_FOUND;
+        }
+    }
+
+    return APR_SUCCESS;
+}
+
 // Projection is not changed
 // TODO: deal with affine scaling
 static int affine_scaling_handler(request_rec *r, sz *tile) {
@@ -435,6 +531,7 @@ static int handler(request_rec *r)
     if (r->args) return DECLINED; // Don't accept arguments
 
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    if (!cfg->enabled) return DECLINED;
 
     if (cfg->regexp) { // Check the guard regexps if they exist, matches agains URL
         int i;
@@ -446,6 +543,7 @@ static int handler(request_rec *r)
         if (i == cfg->regexp->nelts) // No match found
             return DECLINED;
     }
+
 
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
@@ -471,6 +569,9 @@ static int handler(request_rec *r)
 
     // Adjust the level to what the input is
     tile.l += cfg->raster.skip;
+
+    // Need to have mod_receive available
+    SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
 
     if (IS_AFFINE_SCALING(cfg))
         return affine_scaling_handler(r, &tile);

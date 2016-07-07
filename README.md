@@ -27,6 +27,9 @@ Directives for both configuration files
 
 Directives only in the reproject configuration file
 
+**SourcePath**
+  - Mandatory, the location of the tile source, up to the numerical arguments, as a local web path suitable for a subrequest
+
 **EmptyTile**
   - Size Offset FileName
 
@@ -38,3 +41,6 @@ Directives only in the reproject configuration file
 
 **ETagSeed**
   - A base32 64bit number, to be used as a seed for ETag generation
+
+**InputBufferSize**
+  - Default is 1MB, should be larger than the maximum expected input tile size

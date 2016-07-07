@@ -18,14 +18,15 @@
 #define PNG_SIG 0x89504e47
 #define JPEG_SIG 0xffd8ffe0
 #define LERC_SIG 0x436e745a
-
-#define READ_RIGHTS APR_FOPEN_READ | APR_FOPEN_BINARY | APR_FOPEN_LARGEFILE
-
 // This one is not a type, just an encoding
 #define GZIP_SIG 0x436e745a
 
-// Conversion to and from network order, endianess depenent
+#define READ_RIGHTS APR_FOPEN_READ | APR_FOPEN_BINARY | APR_FOPEN_LARGEFILE
 
+// Size of receive buffer, can be made larger
+#define DEFAULT_INPUT_SIZE 1024*1024
+
+// Conversion to and from network order, endianess depenent
 #if (APR_IS_BIGENDIAN == 0) // Little endian
 #if defined(WIN32) // Windows
 #define ntoh32(v) _byteswap_ulong(v)
@@ -80,11 +81,15 @@ struct TiledRaster {
 };
 
 struct  repro_conf {
+    // http_root path of this configuration
+    const char *doc_path;
+
     // The output and input raster figures
     TiledRaster raster, inraster;
 
-    // http_root path of this configuration
-    const char *doc_path;
+    // local web path to redirect the source requests
+    const char *source;
+
     // array of guard regexp, one of them has to match
     apr_array_header_t *regexp;
 
@@ -102,8 +107,23 @@ struct  repro_conf {
 
     // Choose a lower res input instead of a higher one
     int undersample;
+    int enabled;
+    apr_size_t max_input_size;
 };
 
 extern module AP_MODULE_DECLARE_DATA reproject_module;
+
+typedef struct {
+    char *buffer;
+    int size;
+} storage_manager;
+
+// In JPEG_Codec.cpp
+// raster defines the expected tile
+// src contains the input JPEG
+// buffer is the location of the first byte on the first line of decoded data
+// line_stride is the size of a line in buffer (larger or equal to decoded JPEG line)
+// Returns NULL if everything looks fine, or an error message
+const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *buffer, apr_uint32_t line_stride);
 
 #endif

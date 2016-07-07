@@ -11,6 +11,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\JPEG_Codec.cpp" />
     <ClCompile Include="src\mod_reproject.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -64,14 +65,14 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>\Apache24\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>\Apache24\include;jpeg;png;zlib</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
-      <AdditionalLibraryDirectories>\Apache24\lib</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libhttpd.lib;libapr-1.lib;libaprutil-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>\Apache24\lib; jpeg\Release</AdditionalLibraryDirectories>
+      <AdditionalDependencies>libhttpd.lib;libapr-1.lib;libaprutil-1.lib;jpeg.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/EXPORT:reproject_module,@1</AdditionalOptions>
     </Link>
     <PostBuildEvent>
