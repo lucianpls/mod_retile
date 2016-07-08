@@ -1,4 +1,6 @@
 # mod_reproject
+# NOT YET FUNCTIONAL
+
 An apache module that converts a geospatial tile service from one projection and tiling grid to another
 
 Implements one apache configuration directive:

@@ -1,6 +1,10 @@
 /*
+ * mod_reproject.cpp
+ * An AHTSE tile to tile conversion module, should do most of the functionality required by a WMS server
+ * Uses a 3-4 paramter rest tile service as a data source
+ * Currently not functional, working on affine scalling only (pan and zoom)
  *
- *
+ * (C) Lucian Plesea 2016
  */
 
 #include "mod_reproject.h"
@@ -427,40 +431,40 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 
 
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
+// Fetches and decodes all tiles between tl and br, writes output in buffer
+// aligned as a single raster
 static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br, void **buffer)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    const char *error_message;
 
-    int ntiles = int((br.x - tl.x) * (tl.y - br.y));
+    int ntiles = int((br.x - tl.x) * (br.y - tl.y));
     // Should have a reasonable number of input tiles, 64 is a good figure
-    SERR_IF(ntiles > 0 && ntiles < 65, "Too many input tiles required, maximum is 64");
+    SERR_IF(ntiles > 64, "Too many input tiles required, maximum is 64");
 
     // Allocate a buffer for receiving responses
     receive_ctx rctx;
     rctx.maxsize = cfg->max_input_size;
     rctx.buffer = (char *)apr_palloc(r->pool, rctx.maxsize);
 
-    ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, NULL);
+    ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
 
     // Assume data type is byte for now, raster->pagesize.c has to be set correctly
     int pagesize = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.y * cfg->raster.pagesize.c);
-    apr_size_t bufsize = pagesize * ntiles;
-
-    // And a buffer for the output, black background by default
-    *buffer = apr_pcalloc(r->pool, bufsize);
     int input_line_width = int(cfg->raster.pagesize.c * cfg->raster.pagesize.x);
     int line_stride = int((br.x - tl.x) * input_line_width);
-
-    const char *error_message;
+    apr_size_t bufsize = pagesize * ntiles;
+    if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
+        *buffer = apr_pcalloc(r->pool, bufsize);
 
     // Retrieve every required tile and decompress it in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
         char *sub_uri = (tl.z == 0) ?
-            apr_psprintf(r->pool, "%s/%d/%d/%d", cfg->source, tl.l, y, x) :
-            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, tl.z, tl.l, y, x);
+            apr_psprintf(r->pool, "%s/%d/%d/%d", cfg->source, int(tl.l), y, x) :
+            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x);
         request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
 
-        void *b = (char *)(*buffer) + input_line_width * (x - tl.x);
+        void *b = (char *)(*buffer) + pagesize * (y - tl.y) + input_line_width * (x - tl.x);
 
         // Set up user agent signature, prepend the info
         const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
@@ -477,7 +481,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
         }
 
         apr_uint32_t sig;
-        memcpy(&sig, *buffer, sizeof(sig));
+        memcpy(&sig, rctx.buffer, sizeof(sig));
 
         switch (hton32(sig))
         {
@@ -509,15 +513,22 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
 
     // Compute the output tile bounding box
     bbox_t bbox;
-    sz tl_tile, br_tile;
+    // Copy the c from input
+    sz tl_tile = cfg->inraster.pagesize, br_tile = cfg->inraster.pagesize;
 
     // Convert output tile to bbox, then to input tile range
     tile_to_bbox(cfg->raster, tile, bbox);  
     bbox_to_tile(cfg->inraster, input_l, bbox, &tl_tile, &br_tile);
 
     // Complete the setup, pass the z and adjust the level
-    tl_tile.z = tl_tile.z = tile->z;
-    tl_tile.l = tl_tile.l = input_l - cfg->inraster.skip;
+    tl_tile.z = br_tile.z = tile->z;
+    tl_tile.l = br_tile.l = input_l - cfg->inraster.skip;
+
+    void *buffer = NULL;
+    apr_status_t status = retrieve_source(r, tl_tile, br_tile, &buffer);
+
+    if (status != APR_SUCCESS)
+        return status;
 
     return DECLINED;
 }

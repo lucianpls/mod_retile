@@ -1,3 +1,11 @@
+/*
+ * JPEG_Codec.cpp
+ * C++ Wrapper around libjpeg, providing encoding and decoding functions
+ * uses C++ throw-catch instead of setjmp
+ *
+ * (C)Lucian Plesea 2016
+ */
+
 #include "mod_reproject.h"
 #include <jpeglib.h>
 
@@ -71,18 +79,20 @@ const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *
         cinfo.src = &s;
         jpeg_read_header(&cinfo, TRUE);
         cinfo.dct_method = JDCT_FLOAT;
-        if (raster.pagesize.c == 1 || raster.pagesize.c == 3)
+        if (!(raster.pagesize.c == 1 || raster.pagesize.c == 3))
             throw "JPEG only handles one or three color components";
 
         cinfo.out_color_space = (raster.pagesize.c == 3) ? JCS_RGB : JCS_GRAYSCALE;
+        jpeg_start_decompress(&cinfo);
 
         while (cinfo.output_scanline < cinfo.image_height) {
             char *rp[2]; // Two lines at a time
             rp[0] = (char *)buffer + line_stride * cinfo.output_scanline;
             rp[1] = rp[0] + line_stride;
-            jpeg_read_scanlines(&cinfo, JSAMPARRAY(rp), 2); // Will throw if an error is detected
+            jpeg_read_scanlines(&cinfo, JSAMPARRAY(rp), 2);
         }
         jpeg_finish_decompress(&cinfo);
+
     }
     catch (char *error) { // Capture the error message
         message = error;
@@ -91,4 +101,3 @@ const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *
     jpeg_destroy_decompress(&cinfo);
     return message;
 }
-
