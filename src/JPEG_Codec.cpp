@@ -74,9 +74,9 @@ const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *
     s.skip_input_data = skip_input_data_dec;
     s.fill_input_buffer = fill_input_buffer_dec;
     s.resync_to_restart = jpeg_resync_to_restart;
-    jpeg_create_decompress(&cinfo);
 
     try {
+        jpeg_create_decompress(&cinfo);
         cinfo.src = &s;
         jpeg_read_header(&cinfo, TRUE);
         cinfo.dct_method = JDCT_FLOAT;
@@ -116,21 +116,22 @@ const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manag
     mgr.term_destination = init_or_terminate_destination;
 
     cinfo.err = &err;
-    jpeg_create_compress(&cinfo);
-    cinfo.dest = &mgr;
-
-    cinfo.image_width = raster.pagesize.x;
-    cinfo.image_height = raster.pagesize.y;
-    cinfo.input_components = raster.pagesize.c;
-    cinfo.in_color_space = raster.pagesize.c == 3 ? JCS_RGB : JCS_GRAYSCALE;
-
-    jpeg_set_defaults(&cinfo);
-
-    jpeg_set_quality(&cinfo, (int)(quality), TRUE);
-    cinfo.dct_method = JDCT_FLOAT;
-    int linesize = cinfo.image_width * cinfo.num_components;
 
     try {
+        jpeg_create_compress(&cinfo);
+
+        cinfo.dest = &mgr;
+        cinfo.image_width = raster.pagesize.x;
+        cinfo.image_height = raster.pagesize.y;
+        cinfo.input_components = raster.pagesize.c;
+        cinfo.in_color_space = raster.pagesize.c == 3 ? JCS_RGB : JCS_GRAYSCALE;
+
+        jpeg_set_defaults(&cinfo);
+
+        jpeg_set_quality(&cinfo, (int)(quality), TRUE);
+        cinfo.dct_method = JDCT_FLOAT;
+        int linesize = cinfo.image_width * cinfo.num_components;
+
         JSAMPROW rp[2];
         jpeg_start_compress(&cinfo, TRUE);
         while (cinfo.next_scanline != cinfo.image_height) {
