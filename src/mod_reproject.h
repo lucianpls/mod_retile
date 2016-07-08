@@ -105,10 +105,19 @@ struct  repro_conf {
     apr_size_t esize;
     apr_off_t eoffset;
 
+    // Meaning depends on format
+    double quality;
+
+    // What is the buffer size for retrieving tiles
+    apr_size_t max_input_size;
+    // What is the buffer size for outgoing tiles
+    apr_size_t max_output_size;
+
     // Choose a lower res input instead of a higher one
     int undersample;
+
+    // Is mod_reproject configured in this path
     int enabled;
-    apr_size_t max_input_size;
 };
 
 extern module AP_MODULE_DECLARE_DATA reproject_module;
@@ -125,5 +134,6 @@ typedef struct {
 // line_stride is the size of a line in buffer (larger or equal to decoded JPEG line)
 // Returns NULL if everything looks fine, or an error message
 const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *buffer, apr_uint32_t line_stride);
+const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manager &dst, double quality);
 
 #endif

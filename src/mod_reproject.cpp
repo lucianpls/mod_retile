@@ -18,6 +18,31 @@ using namespace std;
 
 #define USER_AGENT "AHTSE Reproject"
 
+static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, char *mime_type = NULL)
+{
+    if (mime_type)
+        ap_set_content_type(r, mime_type);
+    else
+        switch (hton32(*buffer)) {
+        case JPEG_SIG:
+            ap_set_content_type(r, "image/jpeg");
+            break;
+        case PNG_SIG:
+            ap_set_content_type(r, "image/png");
+            break;
+        default: // LERC goes here too
+            ap_set_content_type(r, "application/octet-stream");
+    }
+    // Is it gzipped content?
+    if (GZIP_SIG == hton32(*buffer))
+        apr_table_setn(r->headers_out, "Content-Encoding", "gzip");
+
+    // TODO: Set headers, as chosen by user
+    ap_set_content_length(r, size);
+    ap_rwrite(buffer, size, r);
+    return OK;
+}
+
 // Returns NULL if it worked as expected, returns a four integer value from "x y", "x y z" or "x y z c"
 static char *get_xyzc_size(struct sz *size, const char *value) {
     char *s;
@@ -302,10 +327,20 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (line) 
         c->max_input_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
 
+    line = apr_table_get(kvp, "OutputBufferSize");
+    c->max_output_size = DEFAULT_INPUT_SIZE;
+    if (line)
+        c->max_output_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
+
     line = apr_table_get(kvp, "SourcePath");
     if (!line)
         return "SourcePath directive is missing";
     c->source = apr_pstrdup(cmd->pool, line);
+
+    c->quality = 75.0; // Default for JPEG
+    line = apr_table_get(kvp, "Quality");
+    if (line)
+        c->quality = strtod(line, NULL);
 
     // Enabled if we got this far
     c->enabled = TRUE;
@@ -330,32 +365,6 @@ static apr_array_header_t* tokenize(apr_pool_t *p, const char *s, char sep = '/'
 static int etag_matches(request_rec *r, const char *ETag) {
     const char *ETagIn = apr_table_get(r->headers_in, "If-None-Match");
     return ETagIn != 0 && strstr(ETagIn, ETag);
-}
-
-static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size)
-{
-    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    if (cfg->mime_type)
-        ap_set_content_type(r, cfg->mime_type);
-    else
-        switch (hton32(*buffer)) {
-        case JPEG_SIG:
-            ap_set_content_type(r, "image/jpeg");
-            break;
-        case PNG_SIG:
-            ap_set_content_type(r, "image/png");
-            break;
-        default: // LERC goes here too
-            ap_set_content_type(r, "application/octet-stream");
-    }
-    // Is it gzipped content?
-    if (GZIP_SIG == hton32(*buffer))
-        apr_table_setn(r->headers_out, "Content-Encoding", "gzip");
-
-    // TODO: Set headers, as chosen by user
-    ap_set_content_length(r, size);
-    ap_rwrite(buffer, size, r);
-    return OK;
 }
 
 // Returns the empty tile if defined
@@ -489,7 +498,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
             error_message = jpeg_stride_decode(cfg->inraster, (storage_manager &)(rctx), b, line_stride);
             break;
         default: // This will leave the output unchanged
-            error_message = "Unsupported format";
+            error_message = apr_pstrcat(r->pool, "Unsupported format received from ", sub_uri, NULL);
         }
 
         if (error_message != NULL) {
@@ -498,6 +507,9 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
             return HTTP_NOT_FOUND;
         }
     }
+
+    ap_remove_output_filter(rf);
+    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
 
     return APR_SUCCESS;
 }
@@ -530,7 +542,23 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     if (status != APR_SUCCESS)
         return status;
 
-    return DECLINED;
+    // TODO: Resample and reassemble in output raw buffer
+    // For now, assume the output is exactly the input buffer
+    storage_manager src, dst;
+    dst.size = cfg->max_output_size;
+    dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
+
+    src.buffer = (char *)buffer;
+    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
+    const char *error_message = jpeg_encode(cfg->raster, src, dst, cfg->quality);
+
+    if (error_message) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
+        // Something went wrong if JPEG compression fails
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    
+    return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 
 // If projection is the same, the transformation is an affine scaling
@@ -538,6 +566,7 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
 
 static int handler(request_rec *r)
 {
+    // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
     if (r->method_number != M_GET) return DECLINED;
     if (r->args) return DECLINED; // Don't accept arguments
 

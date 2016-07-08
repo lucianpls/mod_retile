@@ -61,6 +61,7 @@ static boolean fill_input_buffer_dec(j_decompress_ptr cinfo) { return TRUE; }
 // Called if the buffer provided is too small
 static boolean empty_output_buffer(j_compress_ptr cinfo) { return FALSE; }
 
+// TODO: could reuse the cinfo, but it would need an _init_ and a _clean_ function
 const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *buffer, apr_uint32_t line_stride)
 {
     jpeg_decompress_struct cinfo;
@@ -99,5 +100,51 @@ const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *
     }
 
     jpeg_destroy_decompress(&cinfo);
+    return message;
+}
+
+const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manager &dst, double quality)
+{
+    char *message = NULL;
+    struct jpeg_compress_struct cinfo;
+    ErrorMgr err;
+    jpeg_destination_mgr mgr;
+    mgr.next_output_byte = (JOCTET *)dst.buffer;
+    mgr.free_in_buffer = dst.size;
+    mgr.init_destination = init_or_terminate_destination;
+    mgr.empty_output_buffer = empty_output_buffer;
+    mgr.term_destination = init_or_terminate_destination;
+
+    cinfo.err = &err;
+    jpeg_create_compress(&cinfo);
+    cinfo.dest = &mgr;
+
+    cinfo.image_width = raster.pagesize.x;
+    cinfo.image_height = raster.pagesize.y;
+    cinfo.input_components = raster.pagesize.c;
+    cinfo.in_color_space = raster.pagesize.c == 3 ? JCS_RGB : JCS_GRAYSCALE;
+
+    jpeg_set_defaults(&cinfo);
+
+    jpeg_set_quality(&cinfo, (int)(quality), TRUE);
+    cinfo.dct_method = JDCT_FLOAT;
+    int linesize = cinfo.image_width * cinfo.num_components;
+
+    try {
+        JSAMPROW rp[2];
+        jpeg_start_compress(&cinfo, TRUE);
+        while (cinfo.next_scanline != cinfo.image_height) {
+            rp[0] = (JSAMPROW)(src.buffer + linesize * cinfo.next_scanline);
+            rp[1] = (JSAMPROW)(src.buffer + linesize * (cinfo.next_scanline + 1));
+            jpeg_write_scanlines(&cinfo, rp, 2);
+        }
+        jpeg_finish_compress(&cinfo);
+    }
+    catch (char *error_message) {
+        message = error_message;
+    }
+
+    jpeg_destroy_compress(&cinfo);
+    dst.size -= mgr.free_in_buffer;
     return message;
 }

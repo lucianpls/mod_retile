@@ -46,3 +46,6 @@ Directives only in the reproject configuration file
 
 **InputBufferSize**
   - Default is 1MB, should be larger than the maximum expected input tile size
+
+**OutputBufferSize**
+  - Default is 1MB, should be larger than the maximum expected output tile size
