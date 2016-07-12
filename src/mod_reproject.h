@@ -114,7 +114,7 @@ struct  repro_conf {
     apr_size_t max_output_size;
 
     // Choose a lower res input instead of a higher one
-    int undersample;
+    int oversample;
 
     // Is mod_reproject configured in this path
     int enabled;

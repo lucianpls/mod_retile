@@ -288,9 +288,9 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     line = apr_table_get(kvp, "MimeType");
     c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
 
-    // Undersample flag
-    line = apr_table_get(kvp, "Undersample");
-    c->undersample = (line != NULL);
+    // Oversample flag
+    line = apr_table_get(kvp, "Oversample");
+    c->oversample = (line != NULL);
 
     // Allow for one or more RegExp guard
     // One of them has to match if the request is to be considered
@@ -390,13 +390,13 @@ static int send_empty_tile(request_rec *r) {
 }
 
 // Pick an input level based on desired output resolution
-static int input_level(struct TiledRaster &raster, double res, int under) {
+static int input_level(struct TiledRaster &raster, double res, int over) {
     // The raster levels are in increasing resolution order, test until 
     for (int choice = raster.skip; choice < raster.n_levels; choice++) {
         double cres = raster.rsets[choice].resolution;
         cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to avoid jitter noise
         if (cres < res) { // This is the best choice, we will return
-            if (under) choice -= 1; // Use the lower resolution if undersampling
+            if (over) choice -= 1; // Use the lower resolution if oversampling
             if (choice < raster.skip)
                 return raster.skip;
             return choice;
@@ -459,8 +459,8 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
     ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
 
     // Assume data type is byte for now, raster->pagesize.c has to be set correctly
-    int pagesize = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.y * cfg->raster.pagesize.c);
-    int input_line_width = int(cfg->raster.pagesize.c * cfg->raster.pagesize.x);
+    int input_line_width = int(cfg->inraster.pagesize.x * cfg->raster.pagesize.c);
+    int pagesize = int(input_line_width * cfg->inraster.pagesize.y);
     int line_stride = int((br.x - tl.x) * input_line_width);
     apr_size_t bufsize = pagesize * ntiles;
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
@@ -486,7 +486,8 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
         if (rr_status != APR_SUCCESS || rr->status != HTTP_OK) {
             ap_remove_output_filter(rf);
             ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri, rr->status);
-            return HTTP_SERVICE_UNAVAILABLE;
+            return rr->status; // Pass status along
+//            return HTTP_SERVICE_UNAVAILABLE;
         }
 
         apr_uint32_t sig;
@@ -514,19 +515,89 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
     return APR_SUCCESS;
 }
 
-// Projection is not changed
+// Interpolation line, contains the above line and the relative weight (never zero)
+typedef struct {
+    // w is Weigth of next line, can be 0 but not 256.
+    // line is the higher line, to avoid it becoming negative
+    unsigned int line : 24, w:8;
+} iline;
+
+// Offset should be Out - In, center of first pixels, real world coordinates
+// If this is negative, we got trouble?
+static int init_ilines(double delta_in, double delta_out, double offset, iline *itable, int lines)
+{
+    for (int i = 0; i < lines; i++) {
+        double pos = (offset + i * delta_out) / delta_in;
+        // The high line
+        itable[i].line = static_cast<int>(ceil(pos));
+        // Weight of high line, under 256
+        itable[i].w    = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+    }
+    return 0;
+}
+
+// Adjust an interpolation table to avoid addressing unavailable lines
+// Max available is the max available line
+static void adjust_itable(iline *table, int n, int max_avail) {
+    // Adjust the end first
+    while (table[--n].line > max_avail) {
+        table[n].line = max_avail;
+        table[n].w = 255; // Mostly the last available line
+    }
+    for (int i = 0; table[i].line == 0; i++) {
+        table[i].line = 1;
+        table[i].w = 0; // Use line zero value
+    }
+}
+
+static int interpolate(iline *htable = NULL, iline *vtable = NULL) {
+
+}
+
+// Interpolate input to output
+static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, const sz *br,
+    void *src, storage_manager &dst)
+{
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    const double out_res = cfg->raster.rsets[out_tile->l].resolution;
+    const int input_l = input_level(cfg->inraster, out_res, cfg->oversample);
+    const double in_res = cfg->inraster.rsets[input_l].resolution;
+    double offset;
+    sz &outpagesize = cfg->raster.pagesize;
+
+    // Compute the bounding boxes
+    bbox_t out_bbox, in_bbox;
+    tile_to_bbox(cfg->raster, out_tile, out_bbox);
+    tile_to_bbox(cfg->raster, tl, in_bbox);
+
+    // Allocate space for the interpolation tables, for both the x and the y
+    iline *table = (iline *)apr_palloc(r->pool, sizeof(iline)*outpagesize.x + outpagesize.y);
+    iline *h_table = table;
+    iline *v_table = table + outpagesize.x;
+    offset = out_bbox.xmin - in_bbox.xmin + (out_res - in_res) / 2.0;
+    init_ilines(in_res, out_res, offset, h_table, outpagesize.x);
+    offset = out_bbox.ymax - in_bbox.ymax + (out_res - in_res) / 2.0;
+    init_ilines(in_res, out_res, offset, v_table, outpagesize.y);
+
+    // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
+    adjust_itable(h_table, outpagesize.x, (br->x - tl->x) * cfg->inraster.pagesize.x - 1);
+    adjust_itable(v_table, outpagesize.y, (br->y - tl->y) * cfg->inraster.pagesize.y - 1);
+
+    return APR_SUCCESS;
+}
+
+// Projection is not changed, only scaling
 // TODO: deal with affine scaling
 static int affine_scaling_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     double out_res = cfg->raster.rsets[tile->l].resolution;
 
     // The absolute input level
-    int input_l = input_level(cfg->inraster, out_res, cfg->undersample);
+    int input_l = input_level(cfg->inraster, out_res, cfg->oversample);
 
     // Compute the output tile bounding box
     bbox_t bbox;
-    // Copy the c from input
-    sz tl_tile = cfg->inraster.pagesize, br_tile = cfg->inraster.pagesize;
+    sz tl_tile, br_tile;
 
     // Convert output tile to bbox, then to input tile range
     tile_to_bbox(cfg->raster, tile, bbox);  
@@ -534,6 +605,8 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
 
     // Complete the setup, pass the z and adjust the level
     tl_tile.z = br_tile.z = tile->z;
+    // Copy the c from input
+    tl_tile.c = br_tile.c = cfg->inraster.pagesize.c;
     tl_tile.l = br_tile.l = input_l - cfg->inraster.skip;
 
     void *buffer = NULL;
@@ -543,15 +616,22 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
         return status;
 
     // TODO: Resample and reassemble in output raw buffer
-    // For now, assume the output is exactly the input buffer
     storage_manager src, dst;
     dst.size = cfg->max_output_size;
     dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
-
     src.buffer = (char *)buffer;
     src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
-    const char *error_message = jpeg_encode(cfg->raster, src, dst, cfg->quality);
 
+    // If only one tile was read and input and output page matches, it's a tile transform, not scaling
+    if (!(tl_tile.x == br_tile.x && tl_tile.y == br_tile.y
+        && cfg->raster.pagesize.x == cfg->inraster.pagesize.x 
+        && cfg->raster.pagesize.y == cfg->inraster.pagesize.y))
+    {   // Need to do scaling, get a real output buffer
+        src.buffer = (char *)apr_palloc(r->pool, src.size);
+        affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
+    }
+
+    const char *error_message = jpeg_encode(cfg->raster, src, dst, cfg->quality);
     if (error_message) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
         // Something went wrong if JPEG compression fails
