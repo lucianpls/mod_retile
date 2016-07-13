@@ -483,11 +483,10 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 
         rctx.size = 0; // Reset the receive size
         int rr_status = ap_run_sub_req(rr);
-        if (rr_status != APR_SUCCESS || rr->status != HTTP_OK) {
+        if (rr_status != APR_SUCCESS) {
             ap_remove_output_filter(rf);
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri, rr->status);
-            return rr->status; // Pass status along
-//            return HTTP_SERVICE_UNAVAILABLE;
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri);
+            return rr_status; // Pass status along
         }
 
         apr_uint32_t sig;
@@ -531,7 +530,7 @@ static int init_ilines(double delta_in, double delta_out, double offset, iline *
         // The high line
         itable[i].line = static_cast<int>(ceil(pos));
         // Weight of high line, under 256
-        itable[i].w    = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+        itable[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
     }
     return 0;
 }
@@ -550,8 +549,46 @@ static void adjust_itable(iline *table, int n, int max_avail) {
     }
 }
 
-static int interpolate(iline *htable = NULL, iline *vtable = NULL) {
+// An typed interpolation buffer
+template<typename T>
+struct interpolation_buffer {
+    T *buffer;          // Location of first value per line
+    sz size;            // Describes the organization of the buffer
+};
 
+
+// Perform the actual interpolation, using the working type WT
+template<typename T, typename WT = int> static void interpolate(
+    const interpolation_buffer<T> &src, interpolation_buffer<T> &dst,
+    iline *h = NULL, iline *v = NULL)
+{
+    // input and output number of channels should be the same
+    ap_assert(src.size.c == dst.size.c);
+    T *data = dst.buffer;
+    const int colors = dst.size.c;
+    // Source line width
+    const int slw = src.size.x * colors;
+    // Destination line width
+    const int dlw = dst.size.x * colors;
+    for (int y = 0; y < dst.size.y; y++) {
+        unsigned int vw = v[y].w;
+        for (int x = 0; x < dst.size.x; x++)
+        {
+            unsigned int hw = h[x].w;
+            int idx = slw * v[y].line + h[x].line * colors; // Top left index
+            for (int c = 0; c < colors; c++) {
+                WT hi = static_cast<WT>(src.buffer[idx + c]) * hw + 
+                    static_cast<WT>(src.buffer[idx + c - colors]) * (256 - hw);
+                WT lo = static_cast<WT>(src.buffer[idx + c - slw]) * hw + 
+                    static_cast<WT>(src.buffer[idx + c - slw - colors]) * (256 - hw);
+                // Now interpolate the high and low vertical weight
+                WT value = hi * vw + lo * (256 - vw);
+                // The value is multipled by 256^2 because each interpolation is times 256
+                // Make sure the working type is large enough to eliminate overflow
+                *data++ = static_cast<T>(value / (256 * 256));
+            }
+        }
+    }
 }
 
 // Interpolate input to output
@@ -563,25 +600,35 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, 
     const int input_l = input_level(cfg->inraster, out_res, cfg->oversample);
     const double in_res = cfg->inraster.rsets[input_l].resolution;
     double offset;
-    sz &outpagesize = cfg->raster.pagesize;
+
+    // Input and output interpolation buffers
+    interpolation_buffer<unsigned char> ib = 
+        { reinterpret_cast<unsigned char *>(src), cfg->inraster.pagesize};
+        // Input size is a multiple of input pagesize
+    ib.size.x *= (br->x - tl->x);
+    ib.size.y *= (br->y - tl->y);
+    interpolation_buffer<unsigned char> ob = 
+        { reinterpret_cast<unsigned char *>(dst.buffer), cfg->raster.pagesize};
 
     // Compute the bounding boxes
     bbox_t out_bbox, in_bbox;
     tile_to_bbox(cfg->raster, out_tile, out_bbox);
-    tile_to_bbox(cfg->raster, tl, in_bbox);
+    tile_to_bbox(cfg->inraster, tl, in_bbox);
 
     // Allocate space for the interpolation tables, for both the x and the y
-    iline *table = (iline *)apr_palloc(r->pool, sizeof(iline)*outpagesize.x + outpagesize.y);
+    iline *table = (iline *)apr_palloc(r->pool, sizeof(iline)*ob.size.x + ob.size.y);
     iline *h_table = table;
-    iline *v_table = table + outpagesize.x;
+    iline *v_table = table + ob.size.x;
     offset = out_bbox.xmin - in_bbox.xmin + (out_res - in_res) / 2.0;
-    init_ilines(in_res, out_res, offset, h_table, outpagesize.x);
+    init_ilines(in_res, out_res, offset, h_table, ob.size.x);
     offset = out_bbox.ymax - in_bbox.ymax + (out_res - in_res) / 2.0;
-    init_ilines(in_res, out_res, offset, v_table, outpagesize.y);
+    init_ilines(in_res, out_res, offset, v_table, ob.size.y);
 
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
-    adjust_itable(h_table, outpagesize.x, (br->x - tl->x) * cfg->inraster.pagesize.x - 1);
-    adjust_itable(v_table, outpagesize.y, (br->y - tl->y) * cfg->inraster.pagesize.y - 1);
+    adjust_itable(h_table, ob.size.x, ib.size.x - 1);
+    adjust_itable(v_table, ob.size.y, ib.size.y - 1);
+
+    interpolate(ib, ob, h_table, v_table);
 
     return APR_SUCCESS;
 }
