@@ -145,7 +145,8 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
     struct rset level;
     level.width = int(1 + (raster.size.x - 1) / raster.pagesize.x);
     level.height = int(1 + (raster.size.y - 1) / raster.pagesize.y);
-    level.resolution = (raster.bbox.xmax - raster.bbox.xmin) / raster.size.x;
+    level.rx = (raster.bbox.xmax - raster.bbox.xmin) / raster.size.x;
+    level.ry = (raster.bbox.ymax - raster.bbox.ymin) / raster.size.y;
 
     // How many levels do we have
     raster.n_levels = 2 + ilogb(max(level.height, level.width) - 1);
@@ -159,7 +160,8 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
         // Prepare for the next level, assuming powers of two
         level.width = 1 + (level.width - 1) / 2;
         level.height = 1 + (level.height - 1) / 2;
-        level.resolution *= 2;
+        level.rx *= 2;
+        level.ry *= 2;
     }
 
     // MRF has one tile at the top
@@ -379,21 +381,23 @@ static int send_empty_tile(request_rec *r) {
     return send_image(r, cfg->empty, cfg->esize);
 }
 
+// Returns a bad request error if condition is met
 #define REQ_ERR_IF(X) if (X) {\
     return HTTP_BAD_REQUEST; \
 }
 
-// Logs the message as error and returns HTTP ERROR
+// If the condition is met, sends the message to the error log and returns HTTP INTERNAL ERROR
 #define SERR_IF(X, msg) if (X) { \
     ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, msg);\
     return HTTP_INTERNAL_SERVER_ERROR; \
 }
 
 // Pick an input level based on desired output resolution
+// TODO: Consider the Y resolution too
 static int input_level(struct TiledRaster &raster, double res, int over) {
     // The raster levels are in increasing resolution order, test until 
     for (int choice = raster.skip; choice < raster.n_levels; choice++) {
-        double cres = raster.rsets[choice].resolution;
+        double cres = raster.rsets[choice].rx;
         cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to avoid jitter noise
         if (cres < res) { // This is the best choice, we will return
             if (over) choice -= 1; // Use the lower resolution if oversampling
@@ -408,34 +412,37 @@ static int input_level(struct TiledRaster &raster, double res, int over) {
 
 // From a tile location, generate a bounding box of a raster
 static void tile_to_bbox(const TiledRaster &raster, const sz *tile, bbox_t &bb) {
-    double resolution = raster.rsets[tile->l].resolution;
+    double rx = raster.rsets[tile->l].rx;
+    double ry = raster.rsets[tile->l].ry;
+
     // Compute the top left
-    bb.xmin = raster.bbox.xmin + tile->x * resolution * raster.pagesize.x;
-    bb.ymax = raster.bbox.ymax - tile->y * resolution * raster.pagesize.y;
+    bb.xmin = raster.bbox.xmin + tile->x * rx * raster.pagesize.x;
+    bb.ymax = raster.bbox.ymax - tile->y * ry * raster.pagesize.y;
     // Adjust for the bottom right
-    bb.xmax = bb.xmin + resolution * raster.pagesize.x;
-    bb.ymin = bb.ymax - resolution * raster.pagesize.y;
+    bb.xmax = bb.xmin + rx * raster.pagesize.x;
+    bb.ymin = bb.ymax - ry * raster.pagesize.y;
 }
 
 // From a bounding box, calculate the top-left and bottom-right tiles of a specific level of a raster
 // Input level is absolute, the one set in output tiles is relative
 static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz *tl_tile, sz *br_tile) {
-    double resolution = raster.rsets[level].resolution;
-    double x = (bb.xmin - raster.bbox.xmin) / (resolution * raster.pagesize.x);
-    double y = (raster.bbox.ymax - bb.ymax) / (resolution * raster.pagesize.y);
+    double rx = raster.rsets[level].rx;
+    double ry = raster.rsets[level].ry;
+    double x = (bb.xmin - raster.bbox.xmin) / (rx * raster.pagesize.x);
+    double y = (raster.bbox.ymax - bb.ymax) / (ry * raster.pagesize.y);
 
     // Truncate is fine for these two, after adding quarter pixel to eliminate jitter
-    tl_tile->x = int(x + resolution / 4);
-    tl_tile->y = int(y + resolution / 4);
+    tl_tile->x = int(x + rx / 4);
+    tl_tile->y = int(y + ry / 4);
 
-    x = (bb.xmax - raster.bbox.xmin) / (resolution * raster.pagesize.x);
-    y = (raster.bbox.ymax - bb.ymin) / (resolution * raster.pagesize.y);
+    x = (bb.xmax - raster.bbox.xmin) / (rx * raster.pagesize.x);
+    y = (raster.bbox.ymax - bb.ymin) / (ry * raster.pagesize.y);
 
     // Pad these quarter pixel to avoid jitter
-    br_tile->x = int(x + resolution / 4);
-    br_tile->y = int(y + resolution / 4);
-    if (x - br_tile->x > resolution / 2) br_tile->x++;
-    if (y - br_tile->y > resolution / 2) br_tile->y++;
+    br_tile->x = int(x + rx / 4);
+    br_tile->y = int(y + ry / 4);
+    if (x - br_tile->x > rx / 2) br_tile->x++;
+    if (y - br_tile->y > ry / 2) br_tile->y++;
 }
 
 
@@ -473,7 +480,8 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
             apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x);
         request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
 
-        void *b = (char *)(*buffer) + pagesize * (y - tl.y) + input_line_width * (x - tl.x);
+        // Location of first byte of this input tile
+        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x) + input_line_width * (x - tl.x);
 
         // Set up user agent signature, prepend the info
         const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
@@ -497,7 +505,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
         case JPEG_SIG:
             error_message = jpeg_stride_decode(cfg->inraster, (storage_manager &)(rctx), b, line_stride);
             break;
-        default: // This will leave the output unchanged
+        default:
             error_message = apr_pstrcat(r->pool, "Unsupported format received from ", sub_uri, NULL);
         }
 
@@ -517,7 +525,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 // Interpolation line, contains the above line and the relative weight (never zero)
 typedef struct {
     // w is Weigth of next line, can be 0 but not 256.
-    // line is the higher line, to avoid it becoming negative
+    // line is the higher line to be interpolated, always positive
     unsigned int line : 24, w:8;
 } iline;
 
@@ -557,7 +565,10 @@ struct interpolation_buffer {
 };
 
 
+//
 // Perform the actual interpolation, using the working type WT
+// IMPROVEMENT: interpolate could reuse lines of H values.
+//
 template<typename T, typename WT = int> static void interpolate(
     const interpolation_buffer<T> &src, interpolation_buffer<T> &dst,
     iline *h = NULL, iline *v = NULL)
@@ -592,13 +603,16 @@ template<typename T, typename WT = int> static void interpolate(
 }
 
 // Interpolate input to output
+// TODO: Consider the ry
 static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, const sz *br,
     void *src, storage_manager &dst)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    const double out_res = cfg->raster.rsets[out_tile->l].resolution;
-    const int input_l = input_level(cfg->inraster, out_res, cfg->oversample);
-    const double in_res = cfg->inraster.rsets[input_l].resolution;
+    const double out_rx = cfg->raster.rsets[out_tile->l].rx;
+    const double out_ry = cfg->raster.rsets[out_tile->l].ry;
+    const int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
+    const double in_rx = cfg->inraster.rsets[input_l].rx;
+    const double in_ry = cfg->inraster.rsets[input_l].ry;
     double offset;
 
     // Input and output interpolation buffers
@@ -619,10 +633,10 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, 
     iline *table = (iline *)apr_palloc(r->pool, sizeof(iline)*ob.size.x + ob.size.y);
     iline *h_table = table;
     iline *v_table = table + ob.size.x;
-    offset = out_bbox.xmin - in_bbox.xmin + (out_res - in_res) / 2.0;
-    init_ilines(in_res, out_res, offset, h_table, ob.size.x);
-    offset = out_bbox.ymax - in_bbox.ymax + (out_res - in_res) / 2.0;
-    init_ilines(in_res, out_res, offset, v_table, ob.size.y);
+    offset = out_bbox.xmin - in_bbox.xmin + (out_rx - in_rx) / 2.0;
+    init_ilines(in_rx, out_rx, offset, h_table, ob.size.x);
+    offset = out_bbox.ymax - in_bbox.ymax + (out_ry - in_ry) / 2.0;
+    init_ilines(in_ry, out_ry, offset, v_table, ob.size.y);
 
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
     adjust_itable(h_table, ob.size.x, ib.size.x - 1);
@@ -634,13 +648,13 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, 
 }
 
 // Projection is not changed, only scaling
-// TODO: deal with affine scaling
+// TODO: Consider ry
 static int affine_scaling_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    double out_res = cfg->raster.rsets[tile->l].resolution;
+    double out_rx = cfg->raster.rsets[tile->l].rx;
 
     // The absolute input level
-    int input_l = input_level(cfg->inraster, out_res, cfg->oversample);
+    int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
 
     // Compute the output tile bounding box
     bbox_t bbox;
