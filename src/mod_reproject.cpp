@@ -10,6 +10,8 @@
 #include "mod_reproject.h"
 #include <cmath>
 #include <clocale>
+#include <algorithm>
+#include <cctype>
 
 // From mod_receive
 #include <receive_context.h>
@@ -18,7 +20,7 @@ using namespace std;
 
 #define USER_AGENT "AHTSE Reproject"
 
-static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, char *mime_type = NULL)
+static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, const char *mime_type = NULL)
 {
     if (mime_type)
         ap_set_content_type(r, mime_type);
@@ -44,7 +46,7 @@ static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, cha
 }
 
 // Returns NULL if it worked as expected, returns a four integer value from "x y", "x y z" or "x y z c"
-static char *get_xyzc_size(struct sz *size, const char *value) {
+static const char *get_xyzc_size(struct sz *size, const char *value) {
     char *s;
     if (!value)
         return " values missing";
@@ -170,10 +172,10 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
 }
 
 // Temporary switch locale to C, get four comma separated numbers in a bounding box, WMS style
-static char *getbbox(const char *line, bbox_t *bbox)
+static const char *getbbox(const char *line, bbox_t *bbox)
 {
     const char *lcl = setlocale(LC_NUMERIC, NULL);
-    char *message = " format incorrect, expects four comma separated C locale numbers";
+    const char *message = " format incorrect, expects four comma separated C locale numbers";
     char *l;
     setlocale(LC_NUMERIC, "C");
 
@@ -190,7 +192,7 @@ static char *getbbox(const char *line, bbox_t *bbox)
 }
 
 
-static char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &raster)
+static const char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &raster)
 {
     const char *line;
     line = apr_table_get(kvp, "Size");
@@ -277,13 +279,13 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
     if (NULL == kvp) return err_message;
 
-    err_message = ConfigRaster(cmd->pool, kvp, c->inraster);
+    err_message = const_cast<char*>(ConfigRaster(cmd->pool, kvp, c->inraster));
     if (err_message) return apr_pstrcat(cmd->pool, "Source ", err_message, NULL);
 
     // Then the real configuration file
     kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
     if (NULL == kvp) return err_message;
-    err_message = ConfigRaster(cmd->pool, kvp, c->raster);
+    err_message = const_cast<char *>(ConfigRaster(cmd->pool, kvp, c->raster));
     if (err_message) return err_message;
 
     // Output mime type
@@ -306,7 +308,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
             int msize = 2048;
             err_message = (char *)apr_pcalloc(cmd->pool, msize);
             ap_regerror(error, m, err_message, msize);
-            return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message);
+            return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message, NULL);
         }
     }
 
@@ -497,13 +499,14 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
             return rr_status; // Pass status along
         }
 
+	storage_manager src = { rctx.buffer, rctx.size };
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
 
         switch (hton32(sig))
         {
         case JPEG_SIG:
-            error_message = jpeg_stride_decode(cfg->inraster, (storage_manager &)(rctx), b, line_stride);
+            error_message = jpeg_stride_decode(cfg->inraster, src, b, line_stride);
             break;
         default:
             error_message = apr_pstrcat(r->pool, "Unsupported format received from ", sub_uri, NULL);
@@ -545,7 +548,7 @@ static int init_ilines(double delta_in, double delta_out, double offset, iline *
 
 // Adjust an interpolation table to avoid addressing unavailable lines
 // Max available is the max available line
-static void adjust_itable(iline *table, int n, int max_avail) {
+static void adjust_itable(iline *table, int n, unsigned int max_avail) {
     // Adjust the end first
     while (table[--n].line > max_avail) {
         table[n].line = max_avail;
@@ -576,11 +579,11 @@ template<typename T, typename WT = int> static void interpolate(
     // input and output number of channels should be the same
     ap_assert(src.size.c == dst.size.c);
     T *data = dst.buffer;
-    const int colors = dst.size.c;
+    const int colors = static_cast<int>(dst.size.c);
     // Source line width
-    const int slw = src.size.x * colors;
+    const int slw = static_cast<int>(src.size.x * colors);
     // Destination line width
-    const int dlw = dst.size.x * colors;
+    // const int dlw = dst.size.x * colors;
     for (int y = 0; y < dst.size.y; y++) {
         unsigned int vw = v[y].w;
         for (int x = 0; x < dst.size.x; x++)
@@ -630,17 +633,18 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, 
     tile_to_bbox(cfg->inraster, tl, in_bbox);
 
     // Allocate space for the interpolation tables, for both the x and the y
-    iline *table = (iline *)apr_palloc(r->pool, sizeof(iline)*ob.size.x + ob.size.y);
+    iline *table = (iline *)apr_palloc(r->pool, 
+        apr_size_t(sizeof(iline)*ob.size.x + ob.size.y));
     iline *h_table = table;
     iline *v_table = table + ob.size.x;
     offset = out_bbox.xmin - in_bbox.xmin + (out_rx - in_rx) / 2.0;
-    init_ilines(in_rx, out_rx, offset, h_table, ob.size.x);
+    init_ilines(in_rx, out_rx, offset, h_table, int(ob.size.x));
     offset = out_bbox.ymax - in_bbox.ymax + (out_ry - in_ry) / 2.0;
-    init_ilines(in_ry, out_ry, offset, v_table, ob.size.y);
+    init_ilines(in_ry, out_ry, offset, v_table, int(ob.size.y));
 
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
-    adjust_itable(h_table, ob.size.x, ib.size.x - 1);
-    adjust_itable(v_table, ob.size.y, ib.size.y - 1);
+    adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
+    adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
 
     interpolate(ib, ob, h_table, v_table);
 

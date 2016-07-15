@@ -76,7 +76,7 @@ struct TiledRaster {
     int skip;
 
     // geographical projection
-    char *projection;
+    const char *projection;
     bbox_t bbox;
 };
 
@@ -94,7 +94,7 @@ struct  repro_conf {
     apr_array_header_t *regexp;
 
     // Output mime-type, default is JPEG
-    char *mime_type;
+    const char *mime_type;
     // ETag initializer
     apr_uint64_t seed;
     // Buffer for the emtpy tile etag
