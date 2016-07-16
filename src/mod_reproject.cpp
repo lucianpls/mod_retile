@@ -108,7 +108,7 @@ static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, cha
 
 {
     // Should parse it here and initialize the configuration structure
-    err_message = NULL;
+    *err_message = NULL;
     ap_configfile_t *cfg_file;
     apr_status_t s = ap_pcfg_openfile(&cfg_file, pool, fname);
 
@@ -341,6 +341,10 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
         return "SourcePath directive is missing";
     c->source = apr_pstrdup(cmd->pool, line);
 
+    line = apr_table_get(kvp, "SourcePostfix");
+    if (line)
+        c->postfix = apr_pstrdup(cmd->pool, line);
+
     c->quality = 75.0; // Default for JPEG
     line = apr_table_get(kvp, "Quality");
     if (line)
@@ -477,9 +481,12 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 
     // Retrieve every required tile and decompress it in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
-        char *sub_uri = (tl.z == 0) ?
+        char *sub_uri = apr_pstrcat(r->pool,
+            (tl.z == 0) ?
             apr_psprintf(r->pool, "%s/%d/%d/%d", cfg->source, int(tl.l), y, x) :
-            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x);
+            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x),
+            cfg->postfix, NULL);
+
         request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
 
         // Location of first byte of this input tile
@@ -688,7 +695,7 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
 
     // If only one tile was read and input and output page matches, it's a tile transform, not scaling
-    if (!(tl_tile.x == br_tile.x && tl_tile.y == br_tile.y
+    if (!(tl_tile.x + 1 == br_tile.x && tl_tile.y + 1 == br_tile.y
         && cfg->raster.pagesize.x == cfg->inraster.pagesize.x 
         && cfg->raster.pagesize.y == cfg->inraster.pagesize.y))
     {   // Need to do scaling, get a real output buffer

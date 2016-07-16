@@ -13,16 +13,13 @@ The first file contains the source raster information, while the second the desi
   - Mandatory, at least x and y, the raster size in pixels, in both files
 
 **PageSize X Y 1 C**
-  - Optional, the pagesize in pixels, in both files
+  - Optional, the pagesize in pixels, in both files, defaults to 512x512
 
 **Projection String**
   - Optional, in both files
 
 **SkippedLevels N**
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
-
-**Projection WKT**
-  - Optional, defaults to WM, as in WebMercator
 
 **BoundingBox xmin,ymin,xmax,ymax**
   - Optional, bounding box, defaults to 0 to 1 in both x and y
@@ -31,6 +28,9 @@ The first file contains the source raster information, while the second the desi
 
 **SourcePath**
   - Mandatory, the location of the tile source, up to the numerical arguments, as a local web path suitable for a subrequest
+
+**SourcePostfix**
+  - Optional, a literal string that gets appended to the source URL tile requests
 
 **EmptyTile**
   - Size Offset FileName

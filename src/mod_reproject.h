@@ -88,7 +88,7 @@ struct  repro_conf {
     TiledRaster raster, inraster;
 
     // local web path to redirect the source requests
-    const char *source;
+    const char *source, *postfix;
 
     // array of guard regexp, one of them has to match
     apr_array_header_t *regexp;
