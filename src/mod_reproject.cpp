@@ -402,7 +402,7 @@ static int send_empty_tile(request_rec *r) {
 // TODO: Consider the Y resolution too
 static int input_level(struct TiledRaster &raster, double res, int over) {
     // The raster levels are in increasing resolution order, test until 
-    for (int choice = raster.skip; choice < raster.n_levels; choice++) {
+    for (int choice = 0; choice < raster.n_levels; choice++) {
         double cres = raster.rsets[choice].rx;
         cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to avoid jitter noise
         if (cres < res) { // This is the best choice, we will return
@@ -438,17 +438,19 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
     double y = (raster.bbox.ymax - bb.ymax) / (ry * raster.pagesize.y);
 
     // Truncate is fine for these two, after adding quarter pixel to eliminate jitter
-    tl_tile->x = int(x + rx / 4);
-    tl_tile->y = int(y + ry / 4);
+    // X and Y are in pages, so a pixel is 1/pagesize
+    tl_tile->x = int(x + 0.25 / raster.pagesize.x);
+    tl_tile->y = int(y + 0.25 / raster.pagesize.y);
 
     x = (bb.xmax - raster.bbox.xmin) / (rx * raster.pagesize.x);
     y = (raster.bbox.ymax - bb.ymin) / (ry * raster.pagesize.y);
 
     // Pad these quarter pixel to avoid jitter
-    br_tile->x = int(x + rx / 4);
-    br_tile->y = int(y + ry / 4);
-    if (x - br_tile->x > rx / 2) br_tile->x++;
-    if (y - br_tile->y > ry / 2) br_tile->y++;
+    br_tile->x = int(x + 0.25 / raster.pagesize.x);
+    br_tile->y = int(y + 0.25 / raster.pagesize.y);
+    // Use a tile only if we get more than half pixel in
+    if (x - br_tile->x > 0.5 / raster.pagesize.x) br_tile->x++;
+    if (y - br_tile->y > 0.5 / raster.pagesize.y) br_tile->y++;
 }
 
 
@@ -687,21 +689,17 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     if (status != APR_SUCCESS)
         return status;
 
-    // TODO: Resample and reassemble in output raw buffer
-    storage_manager src, dst;
+    // Defined from the point of view of the jpeg create, so this is the output raw tile buffer
+    storage_manager src;
+    // Get a raw tile buffer
+    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
+    src.buffer = (char *)apr_palloc(r->pool, src.size);
+    // Create the output page
+    affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
+
+    storage_manager dst;
     dst.size = cfg->max_output_size;
     dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
-    src.buffer = (char *)buffer;
-    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
-
-    // If only one tile was read and input and output page matches, it's a tile transform, not scaling
-    if (!(tl_tile.x + 1 == br_tile.x && tl_tile.y + 1 == br_tile.y
-        && cfg->raster.pagesize.x == cfg->inraster.pagesize.x 
-        && cfg->raster.pagesize.y == cfg->inraster.pagesize.y))
-    {   // Need to do scaling, get a real output buffer
-        src.buffer = (char *)apr_palloc(r->pool, src.size);
-        affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
-    }
 
     const char *error_message = jpeg_encode(cfg->raster, src, dst, cfg->quality);
     if (error_message) {
@@ -755,12 +753,18 @@ static int handler(request_rec *r)
     if (cfg->raster.size.z != 1 && tokens->nelts)
         tile.z = apr_atoi64(*(char **)apr_array_pop(tokens));
 
-    // Don't allow access to levels less than zero, send the empty tile instead
-    if (tile.l < 0)
+    // Don't allow access to negative values, send the empty tile instead
+    if (tile.l < 0 || tile.x < 0 || tile.y < 0)
         return send_empty_tile(r);
 
     // Adjust the level to what the input is
     tile.l += cfg->raster.skip;
+
+    // Outside of bounds tile returns a not-found error
+    if (tile.l >= cfg->raster.n_levels ||
+        tile.x >= cfg->raster.rsets[tile.l].width ||
+        tile.y >= cfg->raster.rsets[tile.l].height)
+        return HTTP_NOT_FOUND;
 
     // Need to have mod_receive available
     SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
