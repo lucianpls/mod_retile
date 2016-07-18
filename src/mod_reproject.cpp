@@ -536,9 +536,9 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 
 // Interpolation line, contains the above line and the relative weight (never zero)
 typedef struct {
-    // w is Weigth of next line, can be 0 but not 256.
+    // w is weigth of next line *256, can be 0 but not 256.
     // line is the higher line to be interpolated, always positive
-    unsigned int line : 24, w:8;
+    unsigned int w:8, line : 24;
 } iline;
 
 // Offset should be Out - In, center of first pixels, real world coordinates
@@ -616,7 +616,7 @@ template<typename T, typename WT = int> static void interpolate(
 
 // Interpolate input to output
 // TODO: Consider the ry
-static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, const sz *br,
+static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br,
     void *src, storage_manager &dst)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
@@ -639,6 +639,7 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, 
     // Compute the bounding boxes
     bbox_t out_bbox, in_bbox;
     tile_to_bbox(cfg->raster, out_tile, out_bbox);
+    tl->l = input_l;
     tile_to_bbox(cfg->inraster, tl, in_bbox);
 
     // Allocate space for the interpolation tables, for both the x and the y
@@ -648,7 +649,7 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, const sz *tl, 
     iline *v_table = table + ob.size.x;
     offset = out_bbox.xmin - in_bbox.xmin + (out_rx - in_rx) / 2.0;
     init_ilines(in_rx, out_rx, offset, h_table, int(ob.size.x));
-    offset = out_bbox.ymax - in_bbox.ymax + (out_ry - in_ry) / 2.0;
+    offset = in_bbox.ymax - out_bbox.ymax + (out_ry - in_ry) / 2.0;
     init_ilines(in_ry, out_ry, offset, v_table, int(ob.size.y));
 
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
@@ -694,6 +695,8 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     // Get a raw tile buffer
     src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
     src.buffer = (char *)apr_palloc(r->pool, src.size);
+
+    // Improvement: Skip the interpolation if input and output are identical. The savings are small
     // Create the output page
     affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
 
