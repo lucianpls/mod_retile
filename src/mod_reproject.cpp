@@ -283,7 +283,7 @@ static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern
         int msize = 2048;
         err_message = (char *)apr_pcalloc(cmd->pool, msize);
         ap_regerror(error, m, err_message, msize);
-        return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message, NULL);
+        return apr_pstrcat(cmd->pool, "Reproject Regexp incorrect ", err_message, NULL);
     }
     return NULL;
 }
@@ -798,7 +798,7 @@ static const command_rec cmds[] =
     (cmd_func) set_regexp,
     0, // Self-pass argument
     ACCESS_CONF, // availability
-    "Regular expression that the URL has to match to activate reprojection"),
+    "Regular expression that the URL has to match.  At least one is required."),
 
     { NULL }
 };
