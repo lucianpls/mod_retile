@@ -1,10 +1,15 @@
 # mod_reproject
-# NOT YET FUNCTIONAL
+
+# WORK IN PROGRESS
+# LIMITED FUNCTIONALITY
 
 An apache module that converts a geospatial tile service from one projection and tiling grid to another
 
-Implements one apache configuration directive:
-**Retile_ConfigurationFiles source_configuration_file configuration_file**
+Implements two apache configuration directives:
+**Reproject_RegExp string**
+Can be present more than once, one of the existing regular expressions has to match the request URL for the request to be considered
+
+**Reproject_ConfigurationFiles source_configuration_file configuration_file**
 The first file contains the source raster information, while the second the desired configuration for the output 
 
 # Directives for both configuration files
@@ -22,7 +27,7 @@ The first file contains the source raster information, while the second the desi
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
 
 **BoundingBox xmin,ymin,xmax,ymax**
-  - Optional, bounding box, defaults to 0 to 1 in both x and y
+  - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated.
 
 # Directives only in the reproject configuration file
 
@@ -37,9 +42,6 @@ The first file contains the source raster information, while the second the desi
 
 **MimeType**
   - Output mime type, defaults to input format
-
-**RegExp**
-  - One or more, guard regular expression, the URL has to match one of these if any is present
 
 **ETagSeed**
   - A base32 64bit number, to be used as a seed for ETag generation

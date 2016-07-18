@@ -270,6 +270,24 @@ static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
     return NULL;
 }
 
+// Allow for one or more RegExp guard
+// One of them has to match if the request is to be considered
+static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern)
+{
+    char *err_message = NULL;
+    if (c->regexp == 0)
+        c->regexp = apr_array_make(cmd->pool, 2, sizeof(ap_regex_t));
+    ap_regex_t *m = (ap_regex_t *)apr_array_push(c->regexp);
+    int error = ap_regcomp(m, pattern, 0);
+    if (error) {
+        int msize = 2048;
+        err_message = (char *)apr_pcalloc(cmd->pool, msize);
+        ap_regerror(error, m, err_message, msize);
+        return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message, NULL);
+    }
+    return NULL;
+}
+
 static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
 {
     char *err_message;
@@ -295,22 +313,6 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     // Oversample flag
     line = apr_table_get(kvp, "Oversample");
     c->oversample = (line != NULL);
-
-    // Allow for one or more RegExp guard
-    // One of them has to match if the request is to be considered
-    line = apr_table_get(kvp, "RegExp");
-    if (line) {
-        if (c->regexp == 0)
-            c->regexp = apr_array_make(cmd->pool, 2, sizeof(ap_regex_t));
-        ap_regex_t *m = (ap_regex_t *)apr_array_push(c->regexp);
-        int error = ap_regcomp(m, line, 0);
-        if (error) {
-            int msize = 2048;
-            err_message = (char *)apr_pcalloc(cmd->pool, msize);
-            ap_regerror(error, m, err_message, msize);
-            return apr_pstrcat(cmd->pool, "MRF Regexp incorrect ", err_message, NULL);
-        }
-    }
 
     line = apr_table_get(kvp, "ETagSeed");
     // Ignore the flag
@@ -788,8 +790,15 @@ static const command_rec cmds[] =
     (cmd_func) read_config, // Callback
     0, // Self-pass argument
     ACCESS_CONF, // availability
-    "source then output configuration files"
+    "Source and output configuration files"
     ),
+
+    AP_INIT_TAKE1(
+    "Reproject_RegExp",
+    (cmd_func) set_regexp,
+    0, // Self-pass argument
+    ACCESS_CONF, // availability
+    "Regular expression that the URL has to match to activate reprojection"),
 
     { NULL }
 };
