@@ -1,4 +1,4 @@
-C_SRC = mod_reproject.cpp JPEG_Codec.cpp
+C_SRC = mod_reproject.cpp JPEG_codec.cpp PNG_codec.cpp
 FILES = $(C_SRC)
 OBJECTS = $(FILES:.cpp=.lo)
 

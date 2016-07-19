@@ -474,14 +474,16 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
     rctx.buffer = (char *)apr_palloc(r->pool, rctx.maxsize);
 
     ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
+    jpeg_params params;
 
     // Assume data type is byte for now, raster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->raster.pagesize.c);
     int pagesize = int(input_line_width * cfg->inraster.pagesize.y);
-    int line_stride = int((br.x - tl.x) * input_line_width);
+    params.line_stride = int((br.x - tl.x) * input_line_width);
     apr_size_t bufsize = pagesize * ntiles;
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
+
 
     // Retrieve every required tile and decompress it in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
@@ -517,7 +519,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
         switch (hton32(sig))
         {
         case JPEG_SIG:
-            error_message = jpeg_stride_decode(cfg->inraster, src, b, line_stride);
+            error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
             break;
         default:
             error_message = apr_pstrcat(r->pool, "Unsupported format received from ", sub_uri, NULL);
@@ -705,8 +707,9 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     storage_manager dst;
     dst.size = cfg->max_output_size;
     dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
-
-    const char *error_message = jpeg_encode(cfg->raster, src, dst, cfg->quality);
+    jpeg_params params;
+    params.quality = static_cast<int>(cfg->quality);
+    const char *error_message = jpeg_encode(params, cfg->raster, src, dst);
     if (error_message) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
         // Something went wrong if JPEG compression fails

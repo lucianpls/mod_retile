@@ -61,11 +61,10 @@ static boolean fill_input_buffer_dec(j_decompress_ptr cinfo) { return TRUE; }
 // Called if the buffer provided is too small
 static boolean empty_output_buffer(j_compress_ptr cinfo) { return FALSE; }
 
-// TO_IMPROVE: could reuse the cinfo, to save some memory allocation
-// TO_IMPROVE: Use a jpeg memory manager to link JPEG memory into apache's pool mechanism
-
-const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, 
-    void *buffer, apr_uint32_t line_stride)
+// IMPROVE: could reuse the cinfo, to save some memory allocation
+// IMPROVE: Use a jpeg memory manager to link JPEG memory into apache's pool mechanism
+const char *jpeg_stride_decode(jpeg_params &params, const TiledRaster &raster, storage_manager &src, 
+    void *buffer)
 {
     jpeg_decompress_struct cinfo;
     char *message = NULL;
@@ -91,21 +90,23 @@ const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src,
         char *rp[2]; // Two lines at a time
 
         while (cinfo.output_scanline < cinfo.image_height) {
-            rp[0] = (char *)buffer + line_stride * cinfo.output_scanline;
-            rp[1] = rp[0] + line_stride;
+            rp[0] = (char *)buffer + params.line_stride * cinfo.output_scanline;
+            rp[1] = rp[0] + params.line_stride;
             jpeg_read_scanlines(&cinfo, JSAMPARRAY(rp), 2);
         }
         jpeg_finish_decompress(&cinfo);
     }
-    catch (char *error) {
-        message = error; // Capture the error message
+    catch (char *error) { // Capture the error
+        message = params.error_message;
+        strcpy(message, error);
     }
 
     jpeg_destroy_decompress(&cinfo);
-    return message;
+    return message; // Either null or the error message
 }
 
-const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manager &dst, double quality)
+const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_manager &src, 
+    storage_manager &dst)
 {
     char *message = NULL;
     struct jpeg_compress_struct cinfo;
@@ -122,14 +123,14 @@ const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manag
     try {
         jpeg_create_compress(&cinfo);
         cinfo.dest = &mgr;
-        cinfo.image_width = raster.pagesize.x;
-        cinfo.image_height = raster.pagesize.y;
-        cinfo.input_components = raster.pagesize.c;
-        cinfo.in_color_space = raster.pagesize.c == 3 ? JCS_RGB : JCS_GRAYSCALE;
+        cinfo.image_width = static_cast<JDIMENSION>(raster.pagesize.x);
+        cinfo.image_height = static_cast<JDIMENSION>(raster.pagesize.y);
+        cinfo.input_components = static_cast<int>(raster.pagesize.c);
+        cinfo.in_color_space = (raster.pagesize.c == 3) ? JCS_RGB : JCS_GRAYSCALE;
 
         jpeg_set_defaults(&cinfo);
 
-        jpeg_set_quality(&cinfo, (int)(quality), TRUE);
+        jpeg_set_quality(&cinfo, params.quality, TRUE);
         cinfo.dct_method = JDCT_FLOAT;
         int linesize = cinfo.image_width * cinfo.num_components;
 
@@ -143,7 +144,8 @@ const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manag
         jpeg_finish_compress(&cinfo);
     }
     catch (char *error_message) {
-        message = error_message;
+        message = params.error_message;
+        strcpy(message, error_message);
     }
 
     jpeg_destroy_compress(&cinfo);

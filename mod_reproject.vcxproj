@@ -75,6 +75,7 @@
       <AdditionalLibraryDirectories>\Apache24\lib; jpeg\Release</AdditionalLibraryDirectories>
       <AdditionalDependencies>libhttpd.lib;libapr-1.lib;libaprutil-1.lib;jpeg.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/EXPORT:reproject_module,@1</AdditionalOptions>
+      <IgnoreSpecificDefaultLibraries>libcmt;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
     </Link>
     <PostBuildEvent>
       <Command>copy $(OutDir)$(TargetName)$(TargetExt) \Apache24\modules</Command>

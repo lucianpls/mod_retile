@@ -127,13 +127,39 @@ typedef struct {
     int size;
 } storage_manager;
 
-// In JPEG_Codec.cpp
+// Any codec needs a static place for an error message and a line stride when decoding
+struct codec_params {
+    char error_message[1024];
+    apr_uint32_t line_stride;
+};
+
+// In JPEG_codec.cpp
 // raster defines the expected tile
 // src contains the input JPEG
 // buffer is the location of the first byte on the first line of decoded data
 // line_stride is the size of a line in buffer (larger or equal to decoded JPEG line)
 // Returns NULL if everything looks fine, or an error message
-const char *jpeg_stride_decode(TiledRaster &raster, storage_manager &src, void *buffer, apr_uint32_t line_stride);
-const char *jpeg_encode(TiledRaster &raster, storage_manager &src, storage_manager &dst, double quality);
+struct jpeg_params : codec_params {
+    int quality;
+};
+
+const char *jpeg_stride_decode(jpeg_params &params, const TiledRaster &raster, storage_manager &src,
+    void *buffer);
+const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_manager &src,
+    storage_manager &dst);
+
+struct png_params : codec_params {
+};
+
+// In PNG_codec.cpp
+// raster defines the expected tile
+// src contains the input PNG
+// buffer is the location of the first byte on the first line of decoded data
+// line_stride is the size of a line in buffer (larger or equal to decoded PNG line)
+// Returns NULL if everything looks fine, or an error message
+const char *png_stride_decode(png_params &params, const TiledRaster &raster, 
+    storage_manager &src, void *buffer);
+const char *png_encode(png_params &params, const TiledRaster &raster, 
+    storage_manager &src, storage_manager &dst);
 
 #endif

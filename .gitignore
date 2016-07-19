@@ -30,6 +30,9 @@ ipch
 Debug
 Release
 jpeg
+png
+LERC
+zlib
 *.lcl
 
 # Executables
