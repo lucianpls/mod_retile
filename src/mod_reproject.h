@@ -13,6 +13,7 @@
 #include <http_log.h>
 
 #include <apr_strings.h>
+#include <png.h>
 
 // signatures in big endian, to autodetect tile type
 #define PNG_SIG 0x89504e47
@@ -149,6 +150,14 @@ const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_
     storage_manager &dst);
 
 struct png_params : codec_params {
+    // As defined by PNG
+    int color_type, bit_depth;
+    // 0 to 9
+    int compression_level;
+    // If true, NDV is the transparent color
+    int has_transparency;
+    // If has_transparency, this is the transparent color definition
+    png_color_16 NDV;
 };
 
 // In PNG_codec.cpp
