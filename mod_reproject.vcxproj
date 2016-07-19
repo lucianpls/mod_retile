@@ -11,8 +11,9 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\JPEG_Codec.cpp" />
+    <ClCompile Include="src\JPEG_codec.cpp" />
     <ClCompile Include="src\mod_reproject.cpp" />
+    <ClCompile Include="src\PNG_codec.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\mod_reproject.h" />
