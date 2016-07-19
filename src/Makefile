@@ -4,6 +4,8 @@ OBJECTS = $(FILES:.cpp=.lo)
 
 DEFINES = -DLINUX -D_REENTRANT -D_GNU_SOURCE
 
+LIBS = -ljpeg
+
 # Create the ../Makefile.lcl, which should define
 # MOD_PATH, the folder where the apache module should reside
 # INCLUDES, the gcc include commands for httpd, apr headers
@@ -14,7 +16,7 @@ TARGET = .libs/mod_reproject.so
 # Can't use apxs to build c++ modules
 # The options used here might depend on how apache was built
 $(TARGET)       :       $(OBJECTS)
-	libtool --mode=link g++ -o mod_reproject.la -rpath $(MOD_PATH) -module -avoid-version mod_reproject.lo
+	libtool --mode=link g++ -o mod_reproject.la -rpath $(MOD_PATH) -module -avoid-version $^ $(LIBS)
 
 %.lo	:	%.cpp
 	libtool --mode=compile g++ -std=c++0x -prefer-pic -O2 -Wall $(DEFINES) $(INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
