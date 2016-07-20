@@ -6,9 +6,10 @@ DEFINES = -DLINUX -D_REENTRANT -D_GNU_SOURCE
 
 LIBS = -ljpeg
 
-# Create the ../Makefile.lcl, which should define
+# Create Makefile.lcl, which should define
 # MOD_PATH, the folder where the apache module should reside
-# INCLUDES, the gcc include commands for httpd, apr headers
+# INCLUDES, includes for httpd, apr headers
+# For example look at Makefile.lcl.example
 
 include Makefile.lcl
 TARGET = .libs/mod_reproject.so
