@@ -12,6 +12,9 @@
     <Filter Include="DOC">
       <UniqueIdentifier>{30b5396c-fc8c-454b-a143-a67b1604fc39}</UniqueIdentifier>
     </Filter>
+    <Filter Include="GNUMakefiles">
+      <UniqueIdentifier>{35304f9d-1f97-4deb-9100-b7b8f09c84de}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\mod_reproject.cpp">
@@ -35,6 +38,9 @@
     </None>
     <None Include="README.md">
       <Filter>DOC</Filter>
+    </None>
+    <None Include="src\Makefile">
+      <Filter>GNUMakefiles</Filter>
     </None>
   </ItemGroup>
 </Project>

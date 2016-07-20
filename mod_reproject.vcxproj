@@ -21,6 +21,7 @@
   <ItemGroup>
     <None Include="LICENSE" />
     <None Include="README.md" />
+    <None Include="src\Makefile" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{F1875F34-76AF-4D43-B4A6-98065C72E6E1}</ProjectGuid>

@@ -170,5 +170,7 @@ const char *png_stride_decode(png_params &params, const TiledRaster &raster,
     storage_manager &src, void *buffer);
 const char *png_encode(png_params &params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst);
+// Based on the raster configuration, populates a png parameter structure
+int set_png_params(const TiledRaster &raster, png_params *params);
 
 #endif

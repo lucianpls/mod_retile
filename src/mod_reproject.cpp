@@ -707,15 +707,27 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     storage_manager dst;
     dst.size = cfg->max_output_size;
     dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
-    jpeg_params params;
-    params.quality = static_cast<int>(cfg->quality);
-    const char *error_message = jpeg_encode(params, cfg->raster, src, dst);
+    const char *error_message = "Unknown output format requested";
+
+    if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
+        jpeg_params params;
+        params.quality = static_cast<int>(cfg->quality);
+        error_message = jpeg_encode(params, cfg->raster, src, dst);
+    }
+    else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
+        png_params params;
+        set_png_params(cfg->raster, &params);
+        if (cfg->quality < 10) // Otherwise use the default of 6
+            params.compression_level = static_cast<int>(cfg->quality);
+        error_message = png_encode(params, cfg->raster, src, dst);
+    }
+
     if (error_message) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
         // Something went wrong if JPEG compression fails
         return HTTP_INTERNAL_SERVER_ERROR;
     }
-    
+
     return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 

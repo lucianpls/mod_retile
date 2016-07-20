@@ -8,6 +8,8 @@
 #include "mod_reproject.h"
 #include <png.h>
 
+// TODO: Add palette PNG support, possibly other fancy options
+
 // Memory output doesn't need flushing
 static void flush_png(png_structp) {};
 
@@ -147,4 +149,27 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
     dst.size -= mgr.size; // mgr.size is bytes left
 
     return message;
+}
+
+// TODO:  Palette and transparency support
+int set_png_params(const TiledRaster &raster, png_params *params) {
+    // Pick some defaults
+    params->bit_depth = 8;
+    params->compression_level = 6;
+    params->has_transparency = FALSE;
+    switch (raster.pagesize.c) {
+    case 1:
+        params->color_type = PNG_COLOR_TYPE_GRAY;
+        break;
+    case 2:
+        params->color_type = PNG_COLOR_TYPE_GA;
+        break;
+    case 3:
+        params->color_type = PNG_COLOR_TYPE_RGB;
+        break;
+    case 4:
+        params->color_type = PNG_COLOR_TYPE_RGBA;
+        break;
+    }
+    return APR_SUCCESS;
 }
