@@ -19,9 +19,11 @@
     <ClInclude Include="src\mod_reproject.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".gitignore" />
     <None Include="LICENSE" />
     <None Include="README.md" />
     <None Include="src\Makefile" />
+    <None Include="src\Makefile.lcl.example" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{F1875F34-76AF-4D43-B4A6-98065C72E6E1}</ProjectGuid>

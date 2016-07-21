@@ -63,7 +63,7 @@ static boolean empty_output_buffer(j_compress_ptr cinfo) { return FALSE; }
 
 // IMPROVE: could reuse the cinfo, to save some memory allocation
 // IMPROVE: Use a jpeg memory manager to link JPEG memory into apache's pool mechanism
-const char *jpeg_stride_decode(jpeg_params &params, const TiledRaster &raster, storage_manager &src, 
+const char *jpeg_stride_decode(codec_params &params, const TiledRaster &raster, storage_manager &src, 
     void *buffer)
 {
     jpeg_decompress_struct cinfo;

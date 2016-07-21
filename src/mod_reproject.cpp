@@ -474,12 +474,16 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
     rctx.buffer = (char *)apr_palloc(r->pool, rctx.maxsize);
 
     ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
-    jpeg_params params;
+
+    // Not exactly safe, maybe the encode part can be universal
+    codec_params params;
 
     // Assume data type is byte for now, raster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->raster.pagesize.c);
     int pagesize = int(input_line_width * cfg->inraster.pagesize.y);
+
     params.line_stride = int((br.x - tl.x) * input_line_width);
+
     apr_size_t bufsize = pagesize * ntiles;
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
@@ -520,6 +524,9 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
         {
         case JPEG_SIG:
             error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
+            break;
+        case PNG_SIG:
+            error_message = png_stride_decode(params, cfg->inraster, src, b);
             break;
         default:
             error_message = apr_pstrcat(r->pool, "Unsupported format received from ", sub_uri, NULL);

@@ -9,10 +9,7 @@
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;hm;inl;inc;xsd</Extensions>
     </Filter>
-    <Filter Include="DOC">
-      <UniqueIdentifier>{30b5396c-fc8c-454b-a143-a67b1604fc39}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="GNUMakefiles">
+    <Filter Include="Support Files">
       <UniqueIdentifier>{35304f9d-1f97-4deb-9100-b7b8f09c84de}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
@@ -33,14 +30,20 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <None Include="src\Makefile">
+      <Filter>Support Files</Filter>
+    </None>
     <None Include="LICENSE">
-      <Filter>DOC</Filter>
+      <Filter>Support Files</Filter>
     </None>
     <None Include="README.md">
-      <Filter>DOC</Filter>
+      <Filter>Support Files</Filter>
     </None>
-    <None Include="src\Makefile">
-      <Filter>GNUMakefiles</Filter>
+    <None Include="src\Makefile.lcl.example">
+      <Filter>Support Files</Filter>
+    </None>
+    <None Include=".gitignore">
+      <Filter>Support Files</Filter>
     </None>
   </ItemGroup>
 </Project>

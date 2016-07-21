@@ -41,7 +41,7 @@ The first file contains the source raster information, while the second the desi
   - Size Offset FileName
 
 **MimeType**
-  - Output mime type, defaults to input format
+  - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type.
 
 **ETagSeed**
   - A base32 64bit number, to be used as a seed for ETag generation
@@ -53,7 +53,7 @@ The first file contains the source raster information, while the second the desi
   - Default is 1MB, should be larger than the maximum expected output tile size
 
 **Quality**
-  - A floating point figure, format dependent.  Default is 75, suitable for JPEG format
+  - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6.
 
 **Oversample**
   - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one. 
@@ -61,3 +61,9 @@ The first file contains the source raster information, while the second the desi
   # Ways to use
 
   If the input and output size and alignment match, it can be used to change quality.
+
+  **Compiling on Linux**
+  - This module requires the following packages to be installed: g++; httpd-dev; libjpeg-dev and libpng-dev
+  - A Makefile is provided in the src folder, using gmake and libtool
+  Create a Makefile.lcl in the src folder and define system specific environment variable, see Makefile.lcl.example.
+

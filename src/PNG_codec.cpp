@@ -7,6 +7,7 @@
 
 #include "mod_reproject.h"
 #include <png.h>
+#include <vector>
 
 // TODO: Add palette PNG support, possibly other fancy options
 
@@ -44,15 +45,14 @@ static void store_data(png_structp pngp, png_bytep data, png_size_t length)
     dst->size -= length;
 }
 
-// TEST:
-const char *png_stride_decode(png_params &params, const TiledRaster &raster, 
+const char *png_stride_decode(codec_params &params, const TiledRaster &raster, 
     storage_manager &src, void *buffer)
 {
     char *message = NULL;
     png_structp pngp = NULL;
     png_infop infop = NULL;
-    png_bytep *png_rowp = new png_bytep[static_cast<int>(raster.pagesize.y)];
-    for (int i = 0; i < raster.pagesize.y; i++) // line_stride is always in bytes
+    std::vector<png_bytep> png_rowp(static_cast<int>(raster.pagesize.y));
+    for (size_t i = 0; i < png_rowp.size(); i++) // line_stride is always in bytes
         png_rowp[i] = reinterpret_cast<png_bytep>(
             static_cast<char *>(buffer)+i * params.line_stride);
 
@@ -76,7 +76,7 @@ const char *png_stride_decode(png_params &params, const TiledRaster &raster,
         if (raster.pagesize.y != height || raster.pagesize.x != width)
             throw "Input PNG has the wrong size";
 
-        png_read_image(pngp, png_rowp);
+        png_read_image(pngp, png_rowp.data());
         png_read_end(pngp, infop);
     }
     catch (const char *error) {
@@ -89,7 +89,6 @@ const char *png_stride_decode(png_params &params, const TiledRaster &raster,
     }
 
     png_destroy_read_struct(&pngp, &infop, 0);
-    delete[] png_rowp;
 
     return message;
 }
@@ -103,7 +102,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
     png_infop infop = NULL;
     png_uint_32 width = static_cast<png_uint_32>(raster.pagesize.x);
     png_uint_32 height = static_cast<png_uint_32>(raster.pagesize.y);
-    png_bytep *png_rowp = new png_bytep[height];
+    std::vector<png_bytep> png_rowp(height);
 
     // To avoid changing the buffer pointer
     storage_manager mgr = dst;
@@ -122,7 +121,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
             png_set_tRNS(pngp, infop, 0, 0, &params.NDV);
 
         int rowbytes = png_get_rowbytes(pngp, infop);
-        for (int i = 0; i < raster.pagesize.y; i++) {
+        for (size_t i = 0; i < png_rowp.size(); i++) {
             png_rowp[i] = reinterpret_cast<png_bytep>(src.buffer + i*rowbytes);
             if (params.bit_depth == 16) {
                 unsigned short int*p = reinterpret_cast<unsigned short int *>(png_rowp[i]);
@@ -133,7 +132,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
         }
 
         png_write_info(pngp, infop);
-        png_write_image(pngp, png_rowp);
+        png_write_image(pngp, png_rowp.data());
         png_write_end(pngp, infop);
     }
     catch (const char *error) {
@@ -151,7 +150,6 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
     return message;
 }
 
-// TODO:  Palette and transparency support
 int set_png_params(const TiledRaster &raster, png_params *params) {
     // Pick some defaults
     params->bit_depth = 8;

@@ -128,7 +128,12 @@ typedef struct {
     int size;
 } storage_manager;
 
-// Any codec needs a static place for an error message and a line stride when decoding
+//
+// Any decoder needs a static place for an error message and a line stride when decoding
+// This structure is accepted by the decoders, regardless of type
+// For encoders, see format specific extensions below
+//
+
 struct codec_params {
     char error_message[1024];
     apr_uint32_t line_stride;
@@ -144,7 +149,7 @@ struct jpeg_params : codec_params {
     int quality;
 };
 
-const char *jpeg_stride_decode(jpeg_params &params, const TiledRaster &raster, storage_manager &src,
+const char *jpeg_stride_decode(codec_params &params, const TiledRaster &raster, storage_manager &src,
     void *buffer);
 const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_manager &src,
     storage_manager &dst);
@@ -166,7 +171,7 @@ struct png_params : codec_params {
 // buffer is the location of the first byte on the first line of decoded data
 // line_stride is the size of a line in buffer (larger or equal to decoded PNG line)
 // Returns NULL if everything looks fine, or an error message
-const char *png_stride_decode(png_params &params, const TiledRaster &raster, 
+const char *png_stride_decode(codec_params &params, const TiledRaster &raster, 
     storage_manager &src, void *buffer);
 const char *png_encode(png_params &params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst);
