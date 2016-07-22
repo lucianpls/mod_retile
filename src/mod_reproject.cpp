@@ -11,6 +11,7 @@
 #include <cmath>
 #include <clocale>
 #include <algorithm>
+#include <vector>
 #include <cctype>
 
 // From mod_receive
@@ -107,7 +108,6 @@ static void *create_dir_config(apr_pool_t *p, char *path)
 static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, char **err_message)
 
 {
-    // Should parse it here and initialize the configuration structure
     *err_message = NULL;
     ap_configfile_t *cfg_file;
     apr_status_t s = ap_pcfg_openfile(&cfg_file, pool, fname);
@@ -130,8 +130,7 @@ static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, cha
 
     ap_cfg_closefile(cfg_file);
     if (s == APR_ENOSPC) {
-        *err_message = apr_psprintf(pool, " %s lines should be smaller than %d",
-            fname, MAX_STRING_LEN);
+        *err_message = apr_psprintf(pool, "maximum line length of %d exceeded", MAX_STRING_LEN);
         return NULL;
     }
 
@@ -191,7 +190,6 @@ static const char *getbbox(const char *line, bbox_t *bbox)
     return message;
 }
 
-
 static const char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &raster)
 {
     const char *line;
@@ -208,6 +206,9 @@ static const char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRas
         err_message = get_xyzc_size(&(raster.pagesize), line);
         if (err_message) return apr_pstrcat(p, "PageSize", err_message, NULL);
     }
+
+    // Optional data type, defaults to unsigned byte
+    raster.datatype = GetDT(apr_table_get(kvp, "DataType"));
 
     line = apr_table_get(kvp, "SkippedLevels");
     if (line)
@@ -475,11 +476,11 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 
     ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
 
-    // Not exactly safe, maybe the encode part can be universal
     codec_params params;
+    int pixel_size = dt_size[cfg->inraster.datatype];
 
-    // Assume data type is byte for now, raster->pagesize.c has to be set correctly
-    int input_line_width = int(cfg->inraster.pagesize.x * cfg->raster.pagesize.c);
+    // inraster->pagesize.c has to be set correctly
+    int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);
     int pagesize = int(input_line_width * cfg->inraster.pagesize.y);
 
     params.line_stride = int((br.x - tl.x) * input_line_width);
@@ -529,12 +530,11 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
             error_message = png_stride_decode(params, cfg->inraster, src, b);
             break;
         default:
-            error_message = apr_pstrcat(r->pool, "Unsupported format received from ", sub_uri, NULL);
+            error_message = "Unsupported format received";
         }
 
-        if (error_message != NULL) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, sub_uri);
-            // Something went wrong
+        if (error_message != NULL) { // Something went wrong
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s :%s", error_message, sub_uri);
             return HTTP_NOT_FOUND;
         }
     }
@@ -546,6 +546,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 }
 
 // Interpolation line, contains the above line and the relative weight (never zero)
+// These don't have to be bit fields, but it keeps them smaller
 typedef struct {
     // w is weigth of next line *256, can be 0 but not 256.
     // line is the higher line to be interpolated, always positive
@@ -581,29 +582,28 @@ static void adjust_itable(iline *table, int n, unsigned int max_avail) {
 }
 
 // An typed interpolation buffer
-template<typename T>
 struct interpolation_buffer {
-    T *buffer;          // Location of first value per line
+    void *buffer;       // Location of first value per line
     sz size;            // Describes the organization of the buffer
 };
 
 
 //
 // Perform the actual interpolation, using the working type WT
-// IMPROVEMENT: interpolate could reuse lines of H values.
+// IMPROVE: interpolate could reuse lines of H values.
+// IMPROVE: template over the colors, to optimize inner loop
 //
-template<typename T, typename WT = int> static void interpolate(
-    const interpolation_buffer<T> &src, interpolation_buffer<T> &dst,
+template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpolate(
+    const interpolation_buffer &src, interpolation_buffer &dst,
     iline *h = NULL, iline *v = NULL)
 {
     // input and output number of channels should be the same
     ap_assert(src.size.c == dst.size.c);
-    T *data = dst.buffer;
+    T *data = reinterpret_cast<T *>(dst.buffer);
+    T *s = reinterpret_cast<T *>(src.buffer);
     const int colors = static_cast<int>(dst.size.c);
-    // Source line width
-    const int slw = static_cast<int>(src.size.x * colors);
-    // Destination line width
-    // const int dlw = dst.size.x * colors;
+    const int slw = static_cast<int>(src.size.x * colors);    // Source line size in pixels
+    // const int dlw = dst.size.x * colors; // Destination line size in pixels
     for (int y = 0; y < dst.size.y; y++) {
         unsigned int vw = v[y].w;
         for (int x = 0; x < dst.size.x; x++)
@@ -611,11 +611,11 @@ template<typename T, typename WT = int> static void interpolate(
             unsigned int hw = h[x].w;
             int idx = slw * v[y].line + h[x].line * colors; // Top left index
             for (int c = 0; c < colors; c++) {
-                WT hi = static_cast<WT>(src.buffer[idx + c]) * hw + 
-                    static_cast<WT>(src.buffer[idx + c - colors]) * (256 - hw);
-                WT lo = static_cast<WT>(src.buffer[idx + c - slw]) * hw + 
-                    static_cast<WT>(src.buffer[idx + c - slw - colors]) * (256 - hw);
-                // Now interpolate the high and low vertical weight
+                WT hi = static_cast<WT>(s[idx + c]) * hw + 
+                    static_cast<WT>(s[idx + c - colors]) * (256 - hw);
+                WT lo = static_cast<WT>(s[idx + c - slw]) * hw + 
+                    static_cast<WT>(s[idx + c - slw - colors]) * (256 - hw);
+                // Then interpolate the high and low using vertical weight
                 WT value = hi * vw + lo * (256 - vw);
                 // The value is multipled by 256^2 because each interpolation is times 256
                 // Make sure the working type is large enough to eliminate overflow
@@ -627,8 +627,11 @@ template<typename T, typename WT = int> static void interpolate(
 
 // Interpolate input to output
 // TODO: Consider the ry
+// Most of the code is type independent, since it works in pixels
+// Only the interpolation itself is type dependent
+//
 static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br,
-    void *src, storage_manager &dst)
+    void *buffer, storage_manager &dst)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     const double out_rx = cfg->raster.rsets[out_tile->l].rx;
@@ -639,13 +642,11 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     double offset;
 
     // Input and output interpolation buffers
-    interpolation_buffer<unsigned char> ib = 
-        { reinterpret_cast<unsigned char *>(src), cfg->inraster.pagesize};
+    interpolation_buffer ib = {buffer, cfg->inraster.pagesize};
         // Input size is a multiple of input pagesize
     ib.size.x *= (br->x - tl->x);
     ib.size.y *= (br->y - tl->y);
-    interpolation_buffer<unsigned char> ob = 
-        { reinterpret_cast<unsigned char *>(dst.buffer), cfg->raster.pagesize};
+    interpolation_buffer ob = {dst.buffer, cfg->raster.pagesize};
 
     // Compute the bounding boxes
     bbox_t out_bbox, in_bbox;
@@ -653,11 +654,10 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     tl->l = input_l;
     tile_to_bbox(cfg->inraster, tl, in_bbox);
 
-    // Allocate space for the interpolation tables, for both the x and the y
-    iline *table = (iline *)apr_palloc(r->pool, 
-        apr_size_t(sizeof(iline)*ob.size.x + ob.size.y));
-    iline *h_table = table;
-    iline *v_table = table + ob.size.x;
+    // Use a single transient vector for the interpolation table
+    std::vector<iline> table(ob.size.x + ob.size.y);
+    iline *h_table = table.data();
+    iline *v_table = h_table + ob.size.x;
     offset = out_bbox.xmin - in_bbox.xmin + (out_rx - in_rx) / 2.0;
     init_ilines(in_rx, out_rx, offset, h_table, int(ob.size.x));
     offset = in_bbox.ymax - out_bbox.ymax + (out_ry - in_ry) / 2.0;
@@ -667,7 +667,16 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
     adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
 
-    interpolate(ib, ob, h_table, v_table);
+    switch (cfg->raster.datatype) {
+    case GDT_UInt16:
+        interpolate<apr_uint16_t>(ib, ob, h_table, v_table);
+        break;
+    case GDT_Int16:
+        interpolate<apr_int16_t>(ib, ob, h_table, v_table);
+        break;
+    default: // Byte
+        interpolate(ib, ob, h_table, v_table);
+    }
 
     return APR_SUCCESS;
 }
@@ -701,16 +710,18 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     if (status != APR_SUCCESS)
         return status;
 
-    // Defined from the point of view of the jpeg create, so this is the output raw tile buffer
+    // A buffer for outgoing raw tile
     storage_manager src;
     // Get a raw tile buffer
-    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * cfg->raster.pagesize.c);
+    int pixel_size = cfg->raster.pagesize.c * dt_size[cfg->raster.datatype];
+    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
     src.buffer = (char *)apr_palloc(r->pool, src.size);
 
     // Improvement: Skip the interpolation if input and output are identical. The savings are small
     // Create the output page
     affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
 
+    // A buffer for outgoing compressed tile
     storage_manager dst;
     dst.size = cfg->max_output_size;
     dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
@@ -741,26 +752,27 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
 // If projection is the same, the transformation is an affine scaling
 #define IS_AFFINE_SCALING(cfg) !apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
 
+static bool our_request(request_rec *r) {
+    if (r->method_number != M_GET) return false;
+    if (r->args) return false; // Don't accept arguments
+
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    if (!cfg->enabled) return false;
+
+    if (cfg->regexp) { // Check the guard regexps if they exist, matches agains URL
+        char *url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
+        for (int i = 0; i < cfg->regexp->nelts; i++) {
+            ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
+            if (!ap_regexec(m, url_to_match, 0, NULL, 0)) return true; // Found
+        }
+    }
+    return false;
+}
+
 static int handler(request_rec *r)
 {
     // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
-    if (r->method_number != M_GET) return DECLINED;
-    if (r->args) return DECLINED; // Don't accept arguments
-
-    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    if (!cfg->enabled) return DECLINED;
-
-    if (cfg->regexp) { // Check the guard regexps if they exist, matches agains URL
-        int i;
-        char * url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
-        for (i = 0; i < cfg->regexp->nelts; i++) {
-            ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
-            if (!ap_regexec(m, url_to_match, 0, NULL, 0)) break; // Found
-        }
-        if (i == cfg->regexp->nelts) // No match found
-            return DECLINED;
-    }
-
+    if (!our_request(r)) return DECLINED;
 
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
@@ -775,6 +787,7 @@ static int handler(request_rec *r)
     tile.y = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
     tile.l = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
 
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     // We can ignore the error on this one, defaults to zero
     // The parameter before the level can't start with a digit for an extra-dimensional MRF
     if (cfg->raster.size.z != 1 && tokens->nelts)

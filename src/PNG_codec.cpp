@@ -75,9 +75,19 @@ const char *png_stride_decode(codec_params &params, const TiledRaster &raster,
 
         if (raster.pagesize.y != height || raster.pagesize.x != width)
             throw "Input PNG has the wrong size";
+        if (png_get_rowbytes(pngp, infop) != params.line_stride)
+            throw "Wrong type of data in PNG encode";
 
         png_read_image(pngp, png_rowp.data());
         png_read_end(pngp, infop);
+
+        if (bit_depth == 16)
+        for (size_t i = 0; i < png_rowp.size(); i++) {
+            unsigned short int*p = reinterpret_cast<unsigned short int *>(png_rowp[i]);
+            // Swap bytes to host order, in place, on little endian hosts
+            for (int j = 0; j < raster.pagesize.x; j++, p++)
+                *p = ntoh16(*p);
+        }
     }
     catch (const char *error) {
         message = params.error_message;
@@ -102,6 +112,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
     png_infop infop = NULL;
     png_uint_32 width = static_cast<png_uint_32>(raster.pagesize.x);
     png_uint_32 height = static_cast<png_uint_32>(raster.pagesize.y);
+    // Use a vector so it cleans up itself
     std::vector<png_bytep> png_rowp(height);
 
     // To avoid changing the buffer pointer
@@ -127,7 +138,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
                 unsigned short int*p = reinterpret_cast<unsigned short int *>(png_rowp[i]);
                 // Swap bytes to net order, in place
                 for (int j = 0; j < rowbytes / 2; j++, p++)
-                    *p = (*p >> 8) | (*p << 8);
+                    *p = hton16(*p);
             }
         }
 
@@ -169,5 +180,7 @@ int set_png_params(const TiledRaster &raster, png_params *params) {
         params->color_type = PNG_COLOR_TYPE_RGBA;
         break;
     }
+    if (raster.datatype != GDT_Byte)
+        params->bit_depth = 16; // PNG only handles 8 or 16 bits
     return APR_SUCCESS;
 }
