@@ -23,6 +23,9 @@ The first file contains the source raster information, while the second the desi
 **Projection String**
   - Optional, in both files
 
+**DataType**
+  - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive.
+
 **SkippedLevels N**
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
 
