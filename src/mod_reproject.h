@@ -171,6 +171,9 @@ struct  repro_conf {
     // Choose a lower res input instead of a higher one
     int oversample;
 
+    // Use NearNb, not bilinear interpolation
+    int nearNb;
+
     // Is mod_reproject configured in this path
     int enabled;
 };

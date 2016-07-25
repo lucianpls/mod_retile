@@ -59,7 +59,10 @@ The first file contains the source raster information, while the second the desi
   - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6.
 
 **Oversample**
-  - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one. 
+  - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one.
+
+**Nearest**
+  - If on, use nearest neighbor resampling instead of bilinear interpolation.
 
   # Ways to use
 

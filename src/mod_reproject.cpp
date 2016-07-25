@@ -311,9 +311,9 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     line = apr_table_get(kvp, "MimeType");
     c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
 
-    // Oversample flag
-    line = apr_table_get(kvp, "Oversample");
-    c->oversample = (line != NULL);
+    // Sampling flags
+    c->oversample = NULL != apr_table_get(kvp, "Oversample");
+    c->nearNb = NULL != apr_table_get(kvp, "Nearest");
 
     line = apr_table_get(kvp, "ETagSeed");
     // Ignore the flag
@@ -571,17 +571,17 @@ static int init_ilines(double delta_in, double delta_out, double offset, iline *
 // Max available is the max available line
 static void adjust_itable(iline *table, int n, unsigned int max_avail) {
     // Adjust the end first
-    while (table[--n].line > max_avail) {
+    while (n && table[--n].line > max_avail) {
         table[n].line = max_avail;
         table[n].w = 255; // Mostly the last available line
     }
-    for (int i = 0; table[i].line == 0; i++) {
+    for (int i = 0; i < n && table[i].line == 0; i++) {
         table[i].line = 1;
         table[i].w = 0; // Use line zero value
     }
 }
 
-// An typed interpolation buffer
+// An 2D buffer
 struct interpolation_buffer {
     void *buffer;       // Location of first value per line
     sz size;            // Describes the organization of the buffer
@@ -593,12 +593,12 @@ struct interpolation_buffer {
 // IMPROVE: interpolate could reuse lines of H values.
 // IMPROVE: template over the colors, to optimize inner loop
 //
+
 template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpolate(
     const interpolation_buffer &src, interpolation_buffer &dst,
     iline *h = NULL, iline *v = NULL)
 {
-    // input and output number of channels should be the same
-    ap_assert(src.size.c == dst.size.c);
+    ap_assert(src.size.c == dst.size.c); // Same number of colors
     T *data = reinterpret_cast<T *>(dst.buffer);
     T *s = reinterpret_cast<T *>(src.buffer);
     const int colors = static_cast<int>(dst.size.c);
@@ -611,9 +611,9 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
             unsigned int hw = h[x].w;
             int idx = slw * v[y].line + h[x].line * colors; // Top left index
             for (int c = 0; c < colors; c++) {
-                WT hi = static_cast<WT>(s[idx + c]) * hw + 
+                WT hi = static_cast<WT>(s[idx + c]) * hw +
                     static_cast<WT>(s[idx + c - colors]) * (256 - hw);
-                WT lo = static_cast<WT>(s[idx + c - slw]) * hw + 
+                WT lo = static_cast<WT>(s[idx + c - slw]) * hw +
                     static_cast<WT>(s[idx + c - slw - colors]) * (256 - hw);
                 // Then interpolate the high and low using vertical weight
                 WT value = hi * vw + lo * (256 - vw);
@@ -622,6 +622,65 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
                 *data++ = static_cast<T>(value / (256 * 256));
             }
         }
+    }
+}
+
+//
+// NearNb sampling, based no ilines
+// Uses the weights to pick between two choices
+//
+
+template<typename T = apr_byte_t> static void interpolateNN(
+    const interpolation_buffer &src, interpolation_buffer &dst,
+    iline *h, iline *v)
+{
+    ap_assert(src.size.c == dst.size.c);
+    T *data = reinterpret_cast<T *>(dst.buffer);
+    T *s = reinterpret_cast<T *>(src.buffer);
+    const int colors = static_cast<int>(dst.size.c);
+
+    // Precompute the horizontal index table, the vertical is only done once
+    std::vector<int> hidx(dst.size.x);
+    for (int i = 0; i < hidx.size(); i++)
+        hidx[i] = colors * (h[i].line - ((h[i].w < 128) ? 1 : 0));
+
+    if (colors == 1) // faster code due to fewer tests
+        for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
+            int vidx = src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0));
+            for (auto const &hid : hidx)
+                *data++ = s[vidx + hid];
+        }
+    else
+        for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
+            int vidx = colors * src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0));
+            for (auto const &hid : hidx)
+                for (int c = 0; c < colors; c++)
+                    *data++ = s[vidx + hid + c];
+        }
+}
+
+// Calls the right interpolation on the right data type
+void resample(const repro_conf *cfg, const interpolation_buffer &src, interpolation_buffer &dst,
+    iline *h, iline *v)
+{
+    switch (cfg->raster.datatype) {
+    case GDT_UInt16:
+        if (cfg->nearNb)
+            interpolateNN<apr_uint16_t>(src, dst, h, v);
+        else
+            interpolate<apr_uint16_t>(src, dst, h, v);
+        break;
+    case GDT_Int16:
+        if (cfg->nearNb)
+            interpolateNN<apr_int16_t>(src, dst, h, v);
+        else
+            interpolate<apr_int16_t>(src, dst, h, v);
+        break;
+    default: // Byte
+        if (cfg->nearNb)
+            interpolateNN(src, dst, h, v);
+        else
+            interpolate(src, dst, h, v);
     }
 }
 
@@ -666,17 +725,7 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
     adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
     adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
-
-    switch (cfg->raster.datatype) {
-    case GDT_UInt16:
-        interpolate<apr_uint16_t>(ib, ob, h_table, v_table);
-        break;
-    case GDT_Int16:
-        interpolate<apr_int16_t>(ib, ob, h_table, v_table);
-        break;
-    default: // Byte
-        interpolate(ib, ob, h_table, v_table);
-    }
+    resample(cfg, ib, ob, h_table, v_table);
 
     return APR_SUCCESS;
 }
