@@ -477,7 +477,7 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
     ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
 
     codec_params params;
-    int pixel_size = dt_size[cfg->inraster.datatype];
+    int pixel_size = DT_SIZE(cfg->inraster.datatype);
 
     // inraster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);

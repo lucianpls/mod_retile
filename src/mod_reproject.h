@@ -4,6 +4,8 @@
  */
 
 #if !defined(MOD_REPROJECT_H)
+#define MOD_REPROJECT_H
+
 #include <httpd.h>
 #include <http_config.h>
 #include <http_main.h>
@@ -77,6 +79,14 @@ typedef enum {
     GDT_TypeCount = 12          /* maximum type # + 1 */
 } GDALDataType;
 
+//
+// How many bytes in each type, keep in sync with the numbers above
+// Could use C++11 uniform initializers
+//
+const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 4, 4, 8, 8, 16 };
+
+#define DT_SIZE(T) dt_size[T]
+
 // Given a data type name, returns a data type
 static GDALDataType GetDT(const char *name) {
     if (name == NULL) return GDT_Byte;
@@ -96,9 +106,6 @@ static GDALDataType GetDT(const char *name) {
         return GDT_Byte;
 }
 
-
-// How many bytes in each type
-const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 4, 4, 8, 8, 16};
 
 #if defined(APLOG_USE_MODULE)
 APLOG_USE_MODULE(reproject);
