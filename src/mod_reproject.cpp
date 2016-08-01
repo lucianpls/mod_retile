@@ -354,7 +354,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
         c->quality = strtod(line, NULL);
 
     // Enabled if we got this far
-    c->enabled = TRUE;
+    c->enabled = true;
     return NULL;
 }
 
