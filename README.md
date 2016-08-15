@@ -5,6 +5,15 @@
 
 An apache module that converts a geospatial tile service from one projection and tiling grid to another
 
+# Building
+
+Requires apache httpd, libapr-1, libjpeg, libpng and zlib to be available for linking and at runtime.
+In linux this means the runtime and the development packages have to be installed.
+In windows, the header files are expected to be in the zlib, png and jpeg subfolders in the same directory as the project files, and the httpd and apr in /Apache24/include.
+The libraries for all the above packages should be in the \Apache24\lib and \Apache24\bin.
+
+# Usage
+
 Implements two apache configuration directives:
 **Reproject_RegExp string**
 Can be present more than once, one of the existing regular expressions has to match the request URL for the request to be considered
@@ -12,7 +21,7 @@ Can be present more than once, one of the existing regular expressions has to ma
 **Reproject_ConfigurationFiles source_configuration_file configuration_file**
 The first file contains the source raster information, while the second the desired configuration for the output 
 
-# Directives for both configuration files
+# Directives in both source and reproject configuration files
 
 **Size X Y Z C**
   - Mandatory, at least x and y, the raster size in pixels, in both files

@@ -730,9 +730,32 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     return APR_SUCCESS;
 }
 
+// Is the projection GCS
+// TODO: Allow other planets codes
+static bool is_gcs(const char *projection) {
+    return (!apr_strnatcasecmp(projection, "GCS") || !apr_strnatcasecmp(projection, "EPSG:4326"));
+}
+
+// Is the projection spherical mercator
+// TODO: Allow for EPSG codes, also other planets
+static bool is_wm(const char *projection) {
+    return !apr_strnatcasecmp(projection, "WM");
+}
+
+// Is the projection WGS84 based mercator
+// TODO: Allow for EPSG code
+static bool is_mercator(const char *projection) {
+    return !apr_strnatcasecmp(projection, "Mercator");
+}
+
+// If projection is the same, the transformation is an affine scaling
+#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
+#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
+#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
+
 // Projection is not changed, only scaling
 // TODO: Consider ry
-static int affine_scaling_handler(request_rec *r, sz *tile) {
+static int scaling_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     double out_rx = cfg->raster.rsets[tile->l].rx;
 
@@ -798,8 +821,21 @@ static int affine_scaling_handler(request_rec *r, sz *tile) {
     return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 
-// If projection is the same, the transformation is an affine scaling
-#define IS_AFFINE_SCALING(cfg) !apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection)
+static int gcs_to_wm_handler(request_rec *r, sz *tile) {
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    double out_rx = cfg->raster.rsets[tile->l].rx;
+
+    SERR_IF(true, "GCS to WM reprojection not yet implemented");
+    return HTTP_INTERNAL_SERVER_ERROR;
+}
+
+static int wm_to_gcs_handler(request_rec *r, sz *tile) {
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    double out_rx = cfg->raster.rsets[tile->l].rx;
+
+    SERR_IF(true, "WM to GCS reprojection not yet implemented");
+    return HTTP_INTERNAL_SERVER_ERROR;
+}
 
 static bool our_request(request_rec *r) {
     if (r->method_number != M_GET) return false;
@@ -858,11 +894,15 @@ static int handler(request_rec *r)
     // Need to have mod_receive available
     SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
 
+    // TODO: Replace with a defined callback set post-configuration
     if (IS_AFFINE_SCALING(cfg))
-        return affine_scaling_handler(r, &tile);
+        return scaling_handler(r, &tile);
+    else if (IS_GCS2WM(cfg))
+        return gcs_to_wm_handler(r, &tile);
+    else if (IS_WM2GCS(cfg))
+        return wm_to_gcs_handler(r, &tile);
 
-    // TODO: Rest of the handler
-    return DECLINED;
+    SERR_IF(true, "incorrect reprojection setup");
 }
 
 #undef REQ_ERR_IF
