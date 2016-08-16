@@ -7,6 +7,11 @@
  * (C) Lucian Plesea 2016
  */
 
+// TODO: Handle ETag conditional requests
+// TODO: Implement GCS to and from WM
+// TODO: Add LERC support
+// TODO: Allow overlap between tiles
+
 #include "mod_reproject.h"
 #include <cmath>
 #include <clocale>
@@ -18,6 +23,9 @@
 #include <receive_context.h>
 
 using namespace std;
+
+// Rather than use the _USE_MATH_DEFINES, just calculate them once, C++ style
+const static double pi = acos(-1.0);
 
 #define USER_AGENT "AHTSE Reproject"
 
@@ -55,12 +63,12 @@ static const char *get_xyzc_size(struct sz *size, const char *value) {
     size->y = apr_strtoi64(s, &s, 0);
     size->c = 3;
     size->z = 1;
-    if (errno == 0 && *s) { // Read optional third and fourth integers
+    if (errno == 0 && *s == NULL) { // Read optional third and fourth integers
         size->z = apr_strtoi64(s, &s, 0);
         if (*s)
             size->c = apr_strtoi64(s, &s, 0);
     } // Raster size is 4 params max
-    if (errno || *s)
+    if (errno != 0 || *s != NULL)
         return " incorrect format";
     return NULL;
 }
@@ -311,6 +319,12 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     line = apr_table_get(kvp, "MimeType");
     c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
 
+    // Get the planet circumference in meters, for partial coverages
+    line = apr_table_get(kvp, "Radius");
+    // Stored as radius and the inverse of circumference
+    double radius = (line) ? strtod(line, NULL) : 6378137.0;
+    c->eres = 1.0 / (2 * pi * radius);
+
     // Sampling flags
     c->oversample = NULL != apr_table_get(kvp, "Oversample");
     c->nearNb = NULL != apr_table_get(kvp, "Nearest");
@@ -403,7 +417,7 @@ static int send_empty_tile(request_rec *r) {
 
 // Pick an input level based on desired output resolution
 // TODO: Consider the Y resolution too
-static int input_level(struct TiledRaster &raster, double res, int over) {
+static int input_level(const TiledRaster &raster, double res, int over) {
     // The raster levels are in increasing resolution order, test until 
     for (int choice = 0; choice < raster.n_levels; choice++) {
         double cres = raster.rsets[choice].rx;
@@ -547,15 +561,15 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
 
 // Interpolation line, contains the above line and the relative weight (never zero)
 // These don't have to be bit fields, but it keeps them smaller
-typedef struct {
-    // w is weigth of next line *256, can be 0 but not 256.
-    // line is the higher line to be interpolated, always positive
-    unsigned int w:8, line : 24;
-} iline;
+// w is weigth of next line *256, can be 0 but not 256.
+// line is the higher line to be interpolated, always positive
+struct iline {
+    unsigned int w:8, line:24;
+};
 
 // Offset should be Out - In, center of first pixels, real world coordinates
 // If this is negative, we got trouble?
-static int init_ilines(double delta_in, double delta_out, double offset, iline *itable, int lines)
+static void init_ilines(double delta_in, double delta_out, double offset, iline *itable, int lines)
 {
     for (int i = 0; i < lines; i++) {
         double pos = (offset + i * delta_out) / delta_in;
@@ -564,7 +578,6 @@ static int init_ilines(double delta_in, double delta_out, double offset, iline *
         // Weight of high line, under 256
         itable[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
     }
-    return 0;
 }
 
 // Adjust an interpolation table to avoid addressing unavailable lines
@@ -686,13 +699,12 @@ void resample(const repro_conf *cfg, const interpolation_buffer &src, interpolat
 
 // Interpolate input to output
 // TODO: Consider the ry
-// Most of the code is type independent, since it works in pixels
-// Only the interpolation itself is type dependent
 //
 static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br,
     void *buffer, storage_manager &dst)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+
     const double out_rx = cfg->raster.rsets[out_tile->l].rx;
     const double out_ry = cfg->raster.rsets[out_tile->l].ry;
     const int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
@@ -727,6 +739,101 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
     resample(cfg, ib, ob, h_table, v_table);
 
+    return APR_SUCCESS;
+}
+
+// Web mercator X to longitude in degrees
+static double wm2lon(double eres, double x) {
+    return 360 * eres * x;
+}
+
+// Web mercator Y to latitude in degrees
+static double wm2lat(double eres, double y) {
+    return 90 * (1 - 4 / pi * atan(exp(eres * pi * 2 * -y)));
+}
+
+// Convert WM bbox to GCS bbox in degrees
+static void bbox_wm2gcs(double eres, const bbox_t &wm_bbox, bbox_t &gcs_bbox) {
+    gcs_bbox.xmin = wm2lon(eres, wm_bbox.xmin);
+    gcs_bbox.ymin = wm2lat(eres, wm_bbox.ymin);
+    gcs_bbox.xmax = wm2lon(eres, wm_bbox.xmax);
+    gcs_bbox.ymax = wm2lat(eres, wm_bbox.ymax);
+}
+
+static double lon2wm(double eres, double lon) {
+    return lon / 360 / eres;
+}
+
+static double lat2wm(double eres, double lat) {
+    return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
+}
+
+// Convert GCS bbox to WM
+static void bbox_gcs2wm(double eres, const bbox_t &gcs_bbox, bbox_t &wm_bbox) {
+    wm_bbox.xmin = lon2wm(eres, gcs_bbox.xmin);
+    wm_bbox.ymin = lat2wm(eres, gcs_bbox.ymin);
+    wm_bbox.xmax = lon2wm(eres, gcs_bbox.xmax);
+    wm_bbox.ymax = lat2wm(eres, gcs_bbox.ymax);
+}
+
+// Interpolate GCS input to WM output
+// TODO: Write this, see affine_interpolate as a guide
+//
+static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br,
+    void *buffer, storage_manager &dst)
+{
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+
+    const double out_rx = cfg->raster.rsets[out_tile->l].rx;
+    const double out_ry = cfg->raster.rsets[out_tile->l].ry;
+    const int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
+    const double in_rx = cfg->inraster.rsets[input_l].rx;
+    const double in_ry = cfg->inraster.rsets[input_l].ry;
+    double offset;
+
+    // Input and output interpolation buffers
+    interpolation_buffer ib = {buffer, cfg->inraster.pagesize};
+    // Input size is a multiple of input pagesize
+    ib.size.x *= (br->x - tl->x);
+    ib.size.y *= (br->y - tl->y);
+    interpolation_buffer ob = {dst.buffer, cfg->raster.pagesize};
+
+    // Compute the bounding boxes
+    bbox_t out_bbox, out_gcs_bbox, in_bbox;
+    tile_to_bbox(cfg->raster, out_tile, out_bbox); // In web mercator meters
+    bbox_wm2gcs(cfg->eres, out_bbox, out_gcs_bbox); // And in GCS degrees
+
+    // Horizontal output resolution in degrees
+    const double out_rx_gcs = (out_gcs_bbox.xmax - out_gcs_bbox.xmin) / cfg->raster.pagesize.x;
+
+    tl->l = input_l;
+    tile_to_bbox(cfg->inraster, tl, in_bbox); // In GCS degrees
+
+    // Use a single transient vector for the interpolation table
+    std::vector<iline> table(ob.size.x + ob.size.y);
+    iline *h_table = table.data();
+    iline *v_table = h_table + ob.size.x;
+
+    // Horizontal is just scaling
+    offset = out_gcs_bbox.xmin - in_bbox.xmin + (out_rx_gcs - in_rx) / 2.0;
+    init_ilines(in_rx, out_rx_gcs, offset, h_table, int(ob.size.x));
+    // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
+    adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
+
+    // Non linear scaling on the vertical axis
+    for (int i = 0; i < int(ob.size.y); i++) {
+        // Latitude of center pixel for this output line
+        double lat = wm2lat(cfg->eres, out_bbox.ymax - out_ry * (i + 0.5));
+        // Line position
+        double pos = (lat - in_bbox.ymax - in_ry / 2) / in_ry;
+        // Pick the higher line
+        v_table[i].line = static_cast<int>(ceil(pos));
+        // Weight of high line, under 256
+        v_table[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+    }
+    adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
+
+    resample(cfg, ib, ob, h_table, v_table);
     return APR_SUCCESS;
 }
 
@@ -814,22 +921,82 @@ static int scaling_handler(request_rec *r, sz *tile) {
 
     if (error_message) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
-        // Something went wrong if JPEG compression fails
+        // Something went wrong if compression fails
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
     return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 
-static int gcs_to_wm_handler(request_rec *r, sz *tile) {
+static int gcs2wm_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     double out_rx = cfg->raster.rsets[tile->l].rx;
 
-    SERR_IF(true, "GCS to WM reprojection not yet implemented");
-    return HTTP_INTERNAL_SERVER_ERROR;
+    // Pick the level based on X resolution.
+    int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
+
+    // Compute the output tile tile bounding box, in WM
+    bbox_t wm_bbox, gcs_bbox;
+    tile_to_bbox(cfg->raster, tile, wm_bbox);
+
+    // Convert bounding box to GCS, always valid
+    bbox_wm2gcs(cfg->eres, wm_bbox, gcs_bbox);
+
+    // Range of input tiles
+    sz tl_tile, br_tile;
+    bbox_to_tile(cfg->inraster, input_l, gcs_bbox, &tl_tile, &br_tile);
+
+    // Complete the tile setup, pass the z and adjust the level
+    tl_tile.z = br_tile.z = tile->z;
+    // Copy the c from input
+    tl_tile.c = br_tile.c = cfg->inraster.pagesize.c;
+    tl_tile.l = br_tile.l = input_l - cfg->inraster.skip;
+
+    void *buffer = NULL;
+    apr_status_t status = retrieve_source(r, tl_tile, br_tile, &buffer);
+
+    if (status != APR_SUCCESS)
+        return status;
+
+    // A buffer for outgoing raw tile
+    storage_manager src;
+    // Get a raw tile buffer
+    int pixel_size = cfg->raster.pagesize.c * dt_size[cfg->raster.datatype];
+    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
+    src.buffer = (char *)apr_palloc(r->pool, src.size);
+
+    // Create the output page
+    gcs2wm_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
+
+    // A buffer for outgoing compressed tile
+    storage_manager dst;
+    dst.size = cfg->max_output_size;
+    dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
+    const char *error_message = "Unknown output format requested";
+
+    if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
+        jpeg_params params;
+        params.quality = static_cast<int>(cfg->quality);
+        error_message = jpeg_encode(params, cfg->raster, src, dst);
+    }
+    else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
+        png_params params;
+        set_png_params(cfg->raster, &params);
+        if (cfg->quality < 10) // Otherwise use the default of 6
+            params.compression_level = static_cast<int>(cfg->quality);
+        error_message = png_encode(params, cfg->raster, src, dst);
+    }
+
+    if (error_message) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
+        // Something went wrong if compression fails
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 
-static int wm_to_gcs_handler(request_rec *r, sz *tile) {
+static int wm2gcs_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     double out_rx = cfg->raster.rsets[tile->l].rx;
 
@@ -898,9 +1065,9 @@ static int handler(request_rec *r)
     if (IS_AFFINE_SCALING(cfg))
         return scaling_handler(r, &tile);
     else if (IS_GCS2WM(cfg))
-        return gcs_to_wm_handler(r, &tile);
+        return gcs2wm_handler(r, &tile);
     else if (IS_WM2GCS(cfg))
-        return wm_to_gcs_handler(r, &tile);
+        return wm2gcs_handler(r, &tile);
 
     SERR_IF(true, "incorrect reprojection setup");
 }

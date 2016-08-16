@@ -169,6 +169,7 @@ struct  repro_conf {
 
     // Meaning depends on format
     double quality;
+    double eres; // earth resolution: 1 / (2 * PI * R)
 
     // What is the buffer size for retrieving tiles
     apr_size_t max_input_size;
