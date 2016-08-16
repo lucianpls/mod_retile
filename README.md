@@ -33,13 +33,13 @@ The first file contains the source raster information, while the second the desi
   - Optional, in both files
 
 **DataType**
-  - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive.
+  - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive
 
 **SkippedLevels N**
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
 
 **BoundingBox xmin,ymin,xmax,ymax**
-  - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated.
+  - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated
 
 # Directives only in the reproject configuration file
 
@@ -53,7 +53,7 @@ The first file contains the source raster information, while the second the desi
   - Size Offset FileName
 
 **MimeType**
-  - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type.
+  - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type
 
 **ETagSeed**
   - A base32 64bit number, to be used as a seed for ETag generation
@@ -65,23 +65,22 @@ The first file contains the source raster information, while the second the desi
   - Default is 1MB, should be larger than the maximum expected output tile size
 
 **Quality**
-  - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6.
+  - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6
 
 **Oversample**
-  - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one.
+  - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one
 
 **Nearest**
-  - If on, use nearest neighbor resampling instead of bilinear interpolation.
+  - If on, use nearest neighbor resampling instead of bilinear interpolation
 
 **Radius**
-  - The planet radius in meters.  Used in reprojection calculations. Defaults to earth radius.
+  - The planet radius in meters.  Used in reprojection calculations. Defaults to earth radius
 
   # Ways to use
 
-  If the input and output size and alignment match, it can be used to change quality.
+  If the input and output size and alignment match, it can be used to change quality
 
   **Compiling on Linux**
   - This module requires the following packages to be installed: g++; httpd-dev; libjpeg-dev and libpng-dev
   - A Makefile is provided in the src folder, using gmake and libtool
   Create a Makefile.lcl in the src folder and define system specific environment variable, see Makefile.lcl.example.
-
