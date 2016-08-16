@@ -838,21 +838,18 @@ static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
 }
 
 // Is the projection GCS
-// TODO: Allow other planets codes
 static bool is_gcs(const char *projection) {
-    return (!apr_strnatcasecmp(projection, "GCS") || !apr_strnatcasecmp(projection, "EPSG:4326"));
+    return !apr_strnatcasecmp(projection, "GCS") || !apr_strnatcasecmp(projection, "EPSG:4326");
 }
 
 // Is the projection spherical mercator
-// TODO: Allow for EPSG codes, also other planets
 static bool is_wm(const char *projection) {
-    return !apr_strnatcasecmp(projection, "WM");
+    return !apr_strnatcasecmp(projection, "WM") || !apr_strnatcasecmp(projection, "EPSG:3857");
 }
 
 // Is the projection WGS84 based mercator
-// TODO: Allow for EPSG code
 static bool is_mercator(const char *projection) {
-    return !apr_strnatcasecmp(projection, "Mercator");
+    return !apr_strnatcasecmp(projection, "Mercator") || !apr_strnatcasecmp(projection, "EPSG:3395");
 }
 
 // If projection is the same, the transformation is an affine scaling

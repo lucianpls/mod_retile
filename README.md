@@ -73,6 +73,9 @@ The first file contains the source raster information, while the second the desi
 **Nearest**
   - If on, use nearest neighbor resampling instead of bilinear interpolation.
 
+**Radius**
+  - The planet radius in meters.  Used in reprojection calculations. Defaults to earth radius.
+
   # Ways to use
 
   If the input and output size and alignment match, it can be used to change quality.
