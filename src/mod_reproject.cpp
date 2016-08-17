@@ -63,13 +63,16 @@ static const char *get_xyzc_size(struct sz *size, const char *value) {
     size->y = apr_strtoi64(s, &s, 0);
     size->c = 3;
     size->z = 1;
-    if (errno == 0 && *s == NULL) { // Read optional third and fourth integers
+    if (errno == 0 && *s != 0) {
+        // Read optional third and fourth integers
         size->z = apr_strtoi64(s, &s, 0);
-        if (*s)
+        if (*s != 0)
             size->c = apr_strtoi64(s, &s, 0);
-    } // Raster size is 4 params max
-    if (errno != 0 || *s != NULL)
+    }
+    if (errno != 0 || *s != 0) {
+        // Raster size is 4 params max
         return " incorrect format";
+    }
     return NULL;
 }
 
@@ -784,19 +787,9 @@ static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
 
-    const double out_rx = cfg->raster.rsets[out_tile->l].rx;
+    //    const double out_rx = cfg->raster.rsets[out_tile->l].rx;
     const double out_ry = cfg->raster.rsets[out_tile->l].ry;
-    const int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
-    const double in_rx = cfg->inraster.rsets[input_l].rx;
-    const double in_ry = cfg->inraster.rsets[input_l].ry;
-    double offset;
-
-    // Input and output interpolation buffers
-    interpolation_buffer ib = {buffer, cfg->inraster.pagesize};
-    // Input size is a multiple of input pagesize
-    ib.size.x *= (br->x - tl->x);
-    ib.size.y *= (br->y - tl->y);
-    interpolation_buffer ob = {dst.buffer, cfg->raster.pagesize};
+    //    const int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
 
     // Compute the bounding boxes
     bbox_t out_bbox, out_gcs_bbox, in_bbox;
@@ -805,6 +798,16 @@ static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
 
     // Horizontal output resolution in degrees
     const double out_rx_gcs = (out_gcs_bbox.xmax - out_gcs_bbox.xmin) / cfg->raster.pagesize.x;
+    const int input_l = input_level(cfg->inraster, out_rx_gcs, cfg->oversample);
+    const double in_rx = cfg->inraster.rsets[input_l].rx;
+    const double in_ry = cfg->inraster.rsets[input_l].ry;
+
+    // Input and output interpolation buffers
+    interpolation_buffer ib = {buffer, cfg->inraster.pagesize};
+    // Input size is a multiple of input pagesize
+    ib.size.x *= (br->x - tl->x);
+    ib.size.y *= (br->y - tl->y);
+    interpolation_buffer ob = {dst.buffer, cfg->raster.pagesize};
 
     tl->l = input_l;
     tile_to_bbox(cfg->inraster, tl, in_bbox); // In GCS degrees
@@ -815,17 +818,18 @@ static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     iline *v_table = h_table + ob.size.x;
 
     // Horizontal is just scaling
-    offset = out_gcs_bbox.xmin - in_bbox.xmin + (out_rx_gcs - in_rx) / 2.0;
+    double offset = out_gcs_bbox.xmin - in_bbox.xmin + (out_rx_gcs - in_rx) / 2.0;
     init_ilines(in_rx, out_rx_gcs, offset, h_table, int(ob.size.x));
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
     adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
 
     // Non linear scaling on the vertical axis
+    offset = in_bbox.ymax - in_ry / 2;
     for (int i = 0; i < int(ob.size.y); i++) {
         // Latitude of center pixel for this output line
         double lat = wm2lat(cfg->eres, out_bbox.ymax - out_ry * (i + 0.5));
-        // Line position
-        double pos = (lat - in_bbox.ymax - in_ry / 2) / in_ry;
+        // Input line position
+        double pos = (offset - lat) / in_ry;
         // Pick the higher line
         v_table[i].line = static_cast<int>(ceil(pos));
         // Weight of high line, under 256
@@ -927,17 +931,17 @@ static int scaling_handler(request_rec *r, sz *tile) {
 
 static int gcs2wm_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    double out_rx = cfg->raster.rsets[tile->l].rx;
-
-    // Pick the level based on X resolution.
-    int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
-
     // Compute the output tile tile bounding box, in WM
     bbox_t wm_bbox, gcs_bbox;
     tile_to_bbox(cfg->raster, tile, wm_bbox);
 
     // Convert bounding box to GCS, always valid
     bbox_wm2gcs(cfg->eres, wm_bbox, gcs_bbox);
+
+    double out_rx = (gcs_bbox.xmax - gcs_bbox.xmin) / cfg->raster.pagesize.x;
+
+    // Pick the level based on X resolution.
+    int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
 
     // Range of input tiles
     sz tl_tile, br_tile;
@@ -1003,7 +1007,7 @@ static int wm2gcs_handler(request_rec *r, sz *tile) {
 
 static bool our_request(request_rec *r) {
     if (r->method_number != M_GET) return false;
-    if (r->args) return false; // Don't accept arguments
+//    if (r->args) return false; // Don't accept arguments
 
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     if (!cfg->enabled) return false;

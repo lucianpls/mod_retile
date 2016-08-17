@@ -10,7 +10,7 @@ An apache module that converts a geospatial tile service from one projection and
 Requires apache httpd, libapr-1, libjpeg, libpng and zlib to be available for linking and at runtime.
 In linux this means the runtime and the development packages have to be installed.
 In windows, the header files are expected to be in the zlib, png and jpeg subfolders in the same directory as the project files, and the httpd and apr in /Apache24/include.
-The libraries for all the above packages should be in the \Apache24\lib and \Apache24\bin.
+The libraries for all the above packages should be available in \Apache24\lib and \Apache24\bin.
 
 # Usage
 
@@ -78,9 +78,4 @@ The first file contains the source raster information, while the second the desi
 
   # Ways to use
 
-  If the input and output size and alignment match, it can be used to change quality
-
-  **Compiling on Linux**
-  - This module requires the following packages to be installed: g++; httpd-dev; libjpeg-dev and libpng-dev
-  - A Makefile is provided in the src folder, using gmake and libtool
-  Create a Makefile.lcl in the src folder and define system specific environment variable, see Makefile.lcl.example.
+If the input and output size and alignment match, it can be used to change quality or the format
