@@ -8,7 +8,7 @@
  */
 
 // TODO: Handle ETag conditional requests
-// TODO: Implement GCS to and from WM
+// TODO: Implement GCS to and from WM.  This is partly done, but should reuse more code, use classes?
 // TODO: Add LERC support
 // TODO: Allow overlap between tiles
 
@@ -24,7 +24,7 @@
 
 using namespace std;
 
-// Rather than use the _USE_MATH_DEFINES, just calculate them once, C++ style
+// Rather than use the _USE_MATH_DEFINES, just calculate pi once, C++ style
 const static double pi = acos(-1.0);
 
 #define USER_AGENT "AHTSE Reproject"
@@ -780,17 +780,11 @@ static void bbox_gcs2wm(double eres, const bbox_t &gcs_bbox, bbox_t &wm_bbox) {
 }
 
 // Interpolate GCS input to WM output
-// TODO: Write this, see affine_interpolate as a guide
 //
 static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br,
     void *buffer, storage_manager &dst)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-
-    //    const double out_rx = cfg->raster.rsets[out_tile->l].rx;
-    const double out_ry = cfg->raster.rsets[out_tile->l].ry;
-    //    const int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
-
     // Compute the bounding boxes
     bbox_t out_bbox, out_gcs_bbox, in_bbox;
     tile_to_bbox(cfg->raster, out_tile, out_bbox); // In web mercator meters
@@ -825,9 +819,68 @@ static int gcs2wm_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
 
     // Non linear scaling on the vertical axis
     offset = in_bbox.ymax - in_ry / 2;
+    const double out_ry = cfg->raster.rsets[out_tile->l].ry;
     for (int i = 0; i < int(ob.size.y); i++) {
         // Latitude of center pixel for this output line
         double lat = wm2lat(cfg->eres, out_bbox.ymax - out_ry * (i + 0.5));
+        // Input line position
+        double pos = (offset - lat) / in_ry;
+        // Pick the higher line
+        v_table[i].line = static_cast<int>(ceil(pos));
+        // Weight of high line, under 256
+        v_table[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+    }
+    adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
+
+    resample(cfg, ib, ob, h_table, v_table);
+    return APR_SUCCESS;
+}
+
+// Interpolate WM input to GCS output
+//
+static int wm2gcs_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br,
+    void *buffer, storage_manager &dst)
+{
+    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+
+    // Compute the bounding boxes, the output both in native and input CS
+    bbox_t out_bbox, out_bbox_equiv, in_bbox;
+    tile_to_bbox(cfg->raster, out_tile, out_bbox); // In GCS degrees
+    bbox_gcs2wm(cfg->eres, out_bbox, out_bbox_equiv); // And in WM meters
+
+    // Horizontal output resolution in degrees
+    const double out_rx_equiv = (out_bbox_equiv.xmax - out_bbox_equiv.xmin) / cfg->raster.pagesize.x;
+    const int input_l = input_level(cfg->inraster, out_rx_equiv, cfg->oversample);
+    const double in_rx = cfg->inraster.rsets[input_l].rx;
+    const double in_ry = cfg->inraster.rsets[input_l].ry;
+
+    // Input and output interpolation buffers
+    interpolation_buffer ib = { buffer, cfg->inraster.pagesize };
+    // Input size is a multiple of input pagesize
+    ib.size.x *= (br->x - tl->x);
+    ib.size.y *= (br->y - tl->y);
+    interpolation_buffer ob = { dst.buffer, cfg->raster.pagesize };
+
+    tl->l = input_l;
+    tile_to_bbox(cfg->inraster, tl, in_bbox); // In GCS degrees
+
+    // Use a single transient vector for the interpolation table
+    std::vector<iline> table(ob.size.x + ob.size.y);
+    iline *h_table = table.data();
+    iline *v_table = h_table + ob.size.x;
+
+    // Horizontal is just scaling
+    double offset = out_bbox_equiv.xmin - in_bbox.xmin + (out_rx_equiv - in_rx) / 2.0;
+    init_ilines(in_rx, out_rx_equiv, offset, h_table, int(ob.size.x));
+    // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
+    adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
+
+    // Non linear scaling on the vertical axis
+    offset = in_bbox.ymax - in_ry / 2;
+    const double out_ry = cfg->raster.rsets[out_tile->l].ry;
+    for (int i = 0; i < int(ob.size.y); i++) {
+        // Latitude of center pixel for this output line
+        double lat = lat2wm(cfg->eres, out_bbox.ymax - out_ry * (i + 0.5));
         // Input line position
         double pos = (offset - lat) / in_ry;
         // Pick the higher line
@@ -938,10 +991,10 @@ static int gcs2wm_handler(request_rec *r, sz *tile) {
     // Convert bounding box to GCS, always valid
     bbox_wm2gcs(cfg->eres, wm_bbox, gcs_bbox);
 
-    double out_rx = (gcs_bbox.xmax - gcs_bbox.xmin) / cfg->raster.pagesize.x;
+    double out_rx_gcs = (gcs_bbox.xmax - gcs_bbox.xmin) / cfg->raster.pagesize.x;
 
     // Pick the level based on X resolution.
-    int input_l = input_level(cfg->inraster, out_rx, cfg->oversample);
+    int input_l = input_level(cfg->inraster, out_rx_gcs, cfg->oversample);
 
     // Range of input tiles
     sz tl_tile, br_tile;
@@ -962,7 +1015,7 @@ static int gcs2wm_handler(request_rec *r, sz *tile) {
     // A buffer for outgoing raw tile
     storage_manager src;
     // Get a raw tile buffer
-    int pixel_size = cfg->raster.pagesize.c * dt_size[cfg->raster.datatype];
+    int pixel_size = cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype);
     src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
     src.buffer = (char *)apr_palloc(r->pool, src.size);
 
@@ -997,12 +1050,72 @@ static int gcs2wm_handler(request_rec *r, sz *tile) {
     return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 
+
+// TODO: DEBUG
 static int wm2gcs_handler(request_rec *r, sz *tile) {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
     double out_rx = cfg->raster.rsets[tile->l].rx;
 
-    SERR_IF(true, "WM to GCS reprojection not yet implemented");
-    return HTTP_INTERNAL_SERVER_ERROR;
+    bbox_t wm_bbox, gcs_bbox;
+    tile_to_bbox(cfg->raster, tile, gcs_bbox);
+    bbox_gcs2wm(cfg->eres, gcs_bbox, wm_bbox);
+
+    double out_rx_wm = (wm_bbox.xmax - wm_bbox.xmin) / cfg->raster.pagesize.x;
+    // Pick the input level based on equivalend output x resolution
+    int input_l = input_level(cfg->inraster, out_rx_wm, cfg->oversample);
+
+    // Compute range of input tiles
+    sz tl_tile, br_tile;
+    bbox_to_tile(cfg->inraster, input_l, wm_bbox, &tl_tile, &br_tile);
+
+    // Complete the tile setup, pass the z and adjust the level
+    tl_tile.z = br_tile.z = tile->z;
+    // Copy the c from input
+    tl_tile.c = br_tile.c = cfg->inraster.pagesize.c;
+    tl_tile.l = br_tile.l = input_l - cfg->inraster.skip;
+
+    void *buffer = NULL;
+    apr_status_t status = retrieve_source(r, tl_tile, br_tile, &buffer);
+
+    if (status != APR_SUCCESS)
+        return status;
+
+    // A buffer for outgoing raw tile
+    storage_manager src;
+    // Get a raw tile buffer
+    int pixel_size = cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype);
+    src.size = (int)(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
+    src.buffer = (char *)apr_palloc(r->pool, src.size);
+
+    // Create the output page
+    wm2gcs_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
+
+    // A buffer for outgoing compressed tile
+    storage_manager dst;
+    dst.size = cfg->max_output_size;
+    dst.buffer = (char *)apr_palloc(r->pool, (apr_size_t)dst.size);
+    const char *error_message = "Unknown output format requested";
+
+    if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
+        jpeg_params params;
+        params.quality = static_cast<int>(cfg->quality);
+        error_message = jpeg_encode(params, cfg->raster, src, dst);
+    }
+    else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
+        png_params params;
+        set_png_params(cfg->raster, &params);
+        if (cfg->quality < 10) // Otherwise use the default of 6
+            params.compression_level = static_cast<int>(cfg->quality);
+        error_message = png_encode(params, cfg->raster, src, dst);
+    }
+
+    if (error_message) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
+        // Something went wrong if compression fails
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
 }
 
 static bool our_request(request_rec *r) {

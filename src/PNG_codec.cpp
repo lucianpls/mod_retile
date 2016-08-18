@@ -103,7 +103,6 @@ const char *png_stride_decode(codec_params &params, const TiledRaster &raster,
     return message;
 }
 
-// TEST:
 const char *png_encode(png_params &params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst)
 {

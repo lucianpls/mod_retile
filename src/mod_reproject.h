@@ -55,9 +55,8 @@
 #define hton64(v)  (v)
 #endif
 
-// Copied and modified from GDAL, probably not a great idea
-// Only 1,2,4 int types and 4 and 8 floating point types are supported
-/*! Pixel data types */
+// Pixel value data types
+// Copied and modified from GDAL
 typedef enum {
     /*! Unknown or unspecified type */ 		GDT_Unknown = 0,
     /*! Eight bit unsigned integer */           GDT_Byte = 1,
@@ -72,18 +71,14 @@ typedef enum {
                                                 GDT_Float = 6,
     /*! Sixty four bit floating point */        GDT_Float64 = 7,
                                                 GDT_Double = 7,
-    /*! Complex Int16 */                        GDT_CInt16 = 8,
-    /*! Complex Int32 */                        GDT_CInt32 = 9,
-    /*! Complex Float32 */                      GDT_CFloat32 = 10,
-    /*! Complex Float64 */                      GDT_CFloat64 = 11,
-    GDT_TypeCount = 12          /* maximum type # + 1 */
+    GDT_TypeCount = 8          /* maximum type # + 1 */
 } GDALDataType;
 
 //
 // How many bytes in each type, keep in sync with the numbers above
 // Could use C++11 uniform initializers
 //
-const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 4, 4, 8, 8, 16 };
+const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 8 };
 
 #define DT_SIZE(T) dt_size[T]
 
