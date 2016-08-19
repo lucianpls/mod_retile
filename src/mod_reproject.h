@@ -82,25 +82,6 @@ const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 8 };
 
 #define DT_SIZE(T) dt_size[T]
 
-// Given a data type name, returns a data type
-static GDALDataType GetDT(const char *name) {
-    if (name == NULL) return GDT_Byte;
-    if (!apr_strnatcasecmp(name, "UINT16"))
-        return GDT_UInt16;
-    else if (!apr_strnatcasecmp(name, "INT16") || !apr_strnatcasecmp(name, "INT"))
-        return GDT_Int16;
-    else if (!apr_strnatcasecmp(name, "UINT32"))
-        return GDT_UInt32;
-    else if (!apr_strnatcasecmp(name, "INT32") || !apr_strnatcasecmp(name, "INT"))
-        return GDT_Int32;
-    else if (!apr_strnatcasecmp(name, "FLOAT32") || !apr_strnatcasecmp(name, "FLOAT"))
-        return GDT_Float32;
-    else if (!apr_strnatcasecmp(name, "FLOAT64") || !apr_strnatcasecmp(name, "DOUBLE"))
-        return GDT_Float64;
-    else
-        return GDT_Byte;
-}
-
 
 #if defined(APLOG_USE_MODULE)
 APLOG_USE_MODULE(reproject);

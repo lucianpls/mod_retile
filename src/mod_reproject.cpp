@@ -29,6 +29,25 @@ const static double pi = acos(-1.0);
 
 #define USER_AGENT "AHTSE Reproject"
 
+// Given a data type name, returns a data type
+static GDALDataType GetDT(const char *name) {
+    if (name == NULL) return GDT_Byte;
+    if (!apr_strnatcasecmp(name, "UINT16"))
+        return GDT_UInt16;
+    else if (!apr_strnatcasecmp(name, "INT16") || !apr_strnatcasecmp(name, "INT"))
+        return GDT_Int16;
+    else if (!apr_strnatcasecmp(name, "UINT32"))
+        return GDT_UInt32;
+    else if (!apr_strnatcasecmp(name, "INT32") || !apr_strnatcasecmp(name, "INT"))
+        return GDT_Int32;
+    else if (!apr_strnatcasecmp(name, "FLOAT32") || !apr_strnatcasecmp(name, "FLOAT"))
+        return GDT_Float32;
+    else if (!apr_strnatcasecmp(name, "FLOAT64") || !apr_strnatcasecmp(name, "DOUBLE"))
+        return GDT_Float64;
+    else
+        return GDT_Byte;
+}
+
 static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, const char *mime_type = NULL)
 {
     if (mime_type)
@@ -432,7 +451,7 @@ static int input_level(const TiledRaster &raster, double res, int over) {
             return choice;
         }
     }
-    // If we didn't make a choice yet, use the highest resolution input
+    // Use the highest resolution level
     return raster.n_levels -1;
 }
 
@@ -591,7 +610,7 @@ static void adjust_itable(iline *table, int n, unsigned int max_avail) {
         table[n].line = max_avail;
         table[n].w = 255; // Mostly the last available line
     }
-    for (int i = 0; i < n && table[i].line == 0; i++) {
+    for (int i = 0; i < n && table[i].line <= 0; i++) {
         table[i].line = 1;
         table[i].w = 0; // Use line zero value
     }
@@ -764,11 +783,14 @@ static void bbox_wm2gcs(double eres, const bbox_t &wm_bbox, bbox_t &gcs_bbox) {
 }
 
 static double lon2wm(double eres, double lon) {
-    return lon / 360 / eres;
+    return lon / eres / 360;
 }
 
+// Goes out of bounds close to the poles, valid latitude range is under 85.052
 static double lat2wm(double eres, double lat) {
-    return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
+    if (abs(lat) < 85.052)
+        return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
+    return (lat > 85) ? (0.5 / eres) : (-0.5 / eres);
 }
 
 // Convert GCS bbox to WM
@@ -896,17 +918,21 @@ static int wm2gcs_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
 
 // Is the projection GCS
 static bool is_gcs(const char *projection) {
-    return !apr_strnatcasecmp(projection, "GCS") || !apr_strnatcasecmp(projection, "EPSG:4326");
+    return !apr_strnatcasecmp(projection, "GCS") 
+        || !apr_strnatcasecmp(projection, "EPSG:4326");
 }
 
-// Is the projection spherical mercator
+// Is the projection spherical mercator, include the Pseudo Mercator code
 static bool is_wm(const char *projection) {
-    return !apr_strnatcasecmp(projection, "WM") || !apr_strnatcasecmp(projection, "EPSG:3857");
+    return !apr_strnatcasecmp(projection, "WM") 
+        || !apr_strnatcasecmp(projection, "EPSG:3857")
+        || !apr_strnatcasecmp(projection, "EPSG:3785");
 }
 
 // Is the projection WGS84 based mercator
 static bool is_mercator(const char *projection) {
-    return !apr_strnatcasecmp(projection, "Mercator") || !apr_strnatcasecmp(projection, "EPSG:3395");
+    return !apr_strnatcasecmp(projection, "Mercator") 
+        || !apr_strnatcasecmp(projection, "EPSG:3395");
 }
 
 // If projection is the same, the transformation is an affine scaling
