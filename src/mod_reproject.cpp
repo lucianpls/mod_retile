@@ -18,6 +18,12 @@
 #include <vector>
 #include <cctype>
 
+extern module AP_MODULE_DECLARE_DATA reproject_module;
+
+#if defined(APLOG_USE_MODULE)
+APLOG_USE_MODULE(reproject);
+#endif
+
 // From mod_receive
 #include <receive_context.h>
 
@@ -47,12 +53,12 @@ static GDALDataType GetDT(const char *name) {
         return GDT_Byte;
 }
 
-static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, const char *mime_type = NULL)
+static int send_image(request_rec *r, const storage_manager &src, const char *mime_type = NULL)
 {
     if (mime_type)
         ap_set_content_type(r, mime_type);
     else
-        switch (hton32(*buffer)) {
+        switch (hton32(*src.buffer)) {
         case JPEG_SIG:
             ap_set_content_type(r, "image/jpeg");
             break;
@@ -63,16 +69,17 @@ static int send_image(request_rec *r, apr_uint32_t *buffer, apr_size_t size, con
             ap_set_content_type(r, "application/octet-stream");
     }
     // Is it gzipped content?
-    if (GZIP_SIG == hton32(*buffer))
+    if (GZIP_SIG == hton32(*src.buffer))
         apr_table_setn(r->headers_out, "Content-Encoding", "gzip");
 
     // TODO: Set headers, as chosen by user
-    ap_set_content_length(r, size);
-    ap_rwrite(buffer, size, r);
+    ap_set_content_length(r, src.size);
+    ap_rwrite(src.buffer, src.size, r);
     return OK;
 }
 
-// Returns NULL if it worked as expected, returns a four integer value from "x y", "x y z" or "x y z c"
+// Returns NULL if it worked as expected, returns a four integer value from 
+// "x y", "x y z" or "x y z c"
 static const char *get_xyzc_size(struct sz *size, const char *value) {
     char *s;
     if (!value)
@@ -265,35 +272,35 @@ static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
 {
     // If we're provided a file name or a size, pre-read the empty tile in the 
     apr_file_t *efile;
-    apr_off_t offset = c->eoffset;
+    apr_off_t offset = 0;
     apr_status_t stat;
     char *last;
 
-    c->esize = (apr_size_t)apr_strtoi64(line, &last, 0);
+    c->empty.size = static_cast<int>(apr_strtoi64(line, &last, 0));
     // Might be an offset, or offset then file name
     if (last != line)
-        apr_strtoff(&(c->eoffset), last, &last, 0);
+        apr_strtoff(&(offset), last, &last, 0);
     
     while (*last && isblank(*last)) last++;
     const char *efname = last;
 
     // Use the temp pool for the file open, it will close it for us
-    if (!c->esize) { // Don't know the size, get it from the file
+    if (!c->empty.size) { // Don't know the size, get it from the file
         apr_finfo_t finfo;
         stat = apr_stat(&finfo, efname, APR_FINFO_CSIZE, cmd->temp_pool);
         if (APR_SUCCESS != stat)
             return apr_psprintf(cmd->pool, "Can't stat %s %pm", efname, stat);
-        c->esize = (apr_size_t)finfo.csize;
+        c->empty.size = static_cast<int>(finfo.csize);
     }
     stat = apr_file_open(&efile, efname, READ_RIGHTS, 0, cmd->temp_pool);
     if (APR_SUCCESS != stat)
         return apr_psprintf(cmd->pool, "Can't open empty file %s, %pm", efname, stat);
-    c->empty = (apr_uint32_t *)apr_palloc(cmd->pool, (apr_size_t)c->esize);
+    c->empty.buffer = static_cast<char *>(apr_palloc(cmd->pool, (apr_size_t)c->empty.size));
     stat = apr_file_seek(efile, APR_SET, &offset);
     if (APR_SUCCESS != stat)
         return apr_psprintf(cmd->pool, "Can't seek empty tile %s: %pm", efname, stat);
-    apr_size_t size = (apr_size_t)c->esize;
-    stat = apr_file_read(efile, c->empty, &size);
+    apr_size_t size = (apr_size_t)c->empty.size;
+    stat = apr_file_read(efile, c->empty.buffer, &size);
     if (APR_SUCCESS != stat)
         return apr_psprintf(cmd->pool, "Can't read from %s: %pm", efname, stat);
     apr_file_close(efile);
@@ -318,80 +325,30 @@ static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern
     return NULL;
 }
 
-static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
-{
-    char *err_message;
-    const char *line;
-
-    // Start with the source configuration
-    apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
-    if (NULL == kvp) return err_message;
-
-    err_message = const_cast<char*>(ConfigRaster(cmd->pool, kvp, c->inraster));
-    if (err_message) return apr_pstrcat(cmd->pool, "Source ", err_message, NULL);
-
-    // Then the real configuration file
-    kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
-    if (NULL == kvp) return err_message;
-    err_message = const_cast<char *>(ConfigRaster(cmd->pool, kvp, c->raster));
-    if (err_message) return err_message;
-
-    // Output mime type
-    line = apr_table_get(kvp, "MimeType");
-    c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
-
-    // Get the planet circumference in meters, for partial coverages
-    line = apr_table_get(kvp, "Radius");
-    // Stored as radius and the inverse of circumference
-    double radius = (line) ? strtod(line, NULL) : 6378137.0;
-    c->eres = 1.0 / (2 * pi * radius);
-
-    // Sampling flags
-    c->oversample = NULL != apr_table_get(kvp, "Oversample");
-    c->nearNb = NULL != apr_table_get(kvp, "Nearest");
-
-    line = apr_table_get(kvp, "ETagSeed");
-    // Ignore the flag
-    int flag;
-    c->seed = line ? base32decode((unsigned char *)line, &flag) : 0;
-    // Set the missing tile etag, with the extra bit set
-    uint64tobase32(c->seed, c->eETag, 1);
-
-    // EmptyTile, default to nothing
-    line = apr_table_get(kvp, "EmptyTile");
-    if (line) {
-        err_message = read_empty_tile(cmd, c, line);
-        if (err_message) return err_message;
-    }
-
-    line = apr_table_get(kvp, "InputBufferSize");
-    c->max_input_size = DEFAULT_INPUT_SIZE;
-    if (line) 
-        c->max_input_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
-
-    line = apr_table_get(kvp, "OutputBufferSize");
-    c->max_output_size = DEFAULT_INPUT_SIZE;
-    if (line)
-        c->max_output_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
-
-    line = apr_table_get(kvp, "SourcePath");
-    if (!line)
-        return "SourcePath directive is missing";
-    c->source = apr_pstrdup(cmd->pool, line);
-
-    line = apr_table_get(kvp, "SourcePostfix");
-    if (line)
-        c->postfix = apr_pstrdup(cmd->pool, line);
-
-    c->quality = 75.0; // Default for JPEG
-    line = apr_table_get(kvp, "Quality");
-    if (line)
-        c->quality = strtod(line, NULL);
-
-    // Enabled if we got this far
-    c->enabled = true;
-    return NULL;
+// Is the projection GCS
+static bool is_gcs(const char *projection) {
+    return !apr_strnatcasecmp(projection, "GCS")
+        || !apr_strnatcasecmp(projection, "EPSG:4326");
 }
+
+// Is the projection spherical mercator, include the Pseudo Mercator code
+static bool is_wm(const char *projection) {
+    return !apr_strnatcasecmp(projection, "WM")
+        || !apr_strnatcasecmp(projection, "EPSG:3857")
+        || !apr_strnatcasecmp(projection, "EPSG:3785");
+}
+
+// Is the projection WGS84 based mercator
+static bool is_mercator(const char *projection) {
+    return !apr_strnatcasecmp(projection, "Mercator")
+        || !apr_strnatcasecmp(projection, "EPSG:3395");
+}
+
+// If projection is the same, the transformation is an affine scaling
+#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
+#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
+#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
+
 
 //
 // Tokenize a string into an array
@@ -421,8 +378,8 @@ static int send_empty_tile(request_rec *r) {
         return HTTP_NOT_MODIFIED;
     }
 
-    if (!cfg->empty) return DECLINED;
-    return send_image(r, cfg->empty, cfg->esize);
+    if (!cfg->empty.buffer) return DECLINED;
+    return send_image(r, cfg->empty);
 }
 
 // Returns a bad request error if condition is met
@@ -934,30 +891,6 @@ static int wm2gcs_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     return APR_SUCCESS;
 }
 
-// Is the projection GCS
-static bool is_gcs(const char *projection) {
-    return !apr_strnatcasecmp(projection, "GCS") 
-        || !apr_strnatcasecmp(projection, "EPSG:4326");
-}
-
-// Is the projection spherical mercator, include the Pseudo Mercator code
-static bool is_wm(const char *projection) {
-    return !apr_strnatcasecmp(projection, "WM") 
-        || !apr_strnatcasecmp(projection, "EPSG:3857")
-        || !apr_strnatcasecmp(projection, "EPSG:3785");
-}
-
-// Is the projection WGS84 based mercator
-static bool is_mercator(const char *projection) {
-    return !apr_strnatcasecmp(projection, "Mercator") 
-        || !apr_strnatcasecmp(projection, "EPSG:3395");
-}
-
-// If projection is the same, the transformation is an affine scaling
-#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
-#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
-#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
-
 // Projection is not changed, only scaling
 // TODO: Consider ry
 static int scaling_handler(request_rec *r, sz *tile) {
@@ -996,7 +929,7 @@ static int scaling_handler(request_rec *r, sz *tile) {
 
     // Improvement: Skip the interpolation if input and output are identical. The savings are small
     // Create the output page
-    affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
+   affine_interpolate(r, tile, &tl_tile, &br_tile, buffer, src);
 
     // A buffer for outgoing compressed tile
     storage_manager dst;
@@ -1023,7 +956,7 @@ static int scaling_handler(request_rec *r, sz *tile) {
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
+    return send_image(r, dst, cfg->mime_type);
 }
 
 static int gcs2wm_handler(request_rec *r, sz *tile) {
@@ -1091,7 +1024,7 @@ static int gcs2wm_handler(request_rec *r, sz *tile) {
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
+    return send_image(r, dst, cfg->mime_type);
 }
 
 
@@ -1159,22 +1092,18 @@ static int wm2gcs_handler(request_rec *r, sz *tile) {
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    return send_image(r, (apr_uint32_t *)dst.buffer, dst.size, cfg->mime_type);
+    return send_image(r, dst, cfg->mime_type);
 }
 
 static bool our_request(request_rec *r) {
     if (r->method_number != M_GET) return false;
-//    if (r->args) return false; // Don't accept arguments
-
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    if (!cfg->enabled) return false;
 
-    if (cfg->regexp) { // Check the guard regexps if they exist, matches agains URL
-        char *url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
-        for (int i = 0; i < cfg->regexp->nelts; i++) {
-            ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
-            if (!ap_regexec(m, url_to_match, 0, NULL, 0)) return true; // Found
-        }
+    if (!cfg->rp || !cfg->regexp) return false;
+    char *url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
+    for (int i = 0; i < cfg->regexp->nelts; i++) {
+        ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
+        if (!ap_regexec(m, url_to_match, 0, NULL, 0)) return true; // Found
     }
     return false;
 }
@@ -1220,17 +1149,91 @@ static int handler(request_rec *r)
     SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
 
     // TODO: Replace with a defined callback set post-configuration
-    if (IS_AFFINE_SCALING(cfg))
-        return scaling_handler(r, &tile);
-    else if (IS_GCS2WM(cfg))
-        return gcs2wm_handler(r, &tile);
-    else if (IS_WM2GCS(cfg))
-        return wm2gcs_handler(r, &tile);
+    SERR_IF(cfg->rp == NULL, "incorrect reprojection setup");
+    return cfg->rp(r, &tile);
 
-    SERR_IF(true, "incorrect reprojection setup");
+
 }
-
 #undef REQ_ERR_IF
+
+static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
+{
+    char *err_message;
+    const char *line;
+
+    // Start with the source configuration
+    apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
+    if (NULL == kvp) return err_message;
+
+    err_message = const_cast<char*>(ConfigRaster(cmd->pool, kvp, c->inraster));
+    if (err_message) return apr_pstrcat(cmd->pool, "Source ", err_message, NULL);
+
+    // Then the real configuration file
+    kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
+    if (NULL == kvp) return err_message;
+    err_message = const_cast<char *>(ConfigRaster(cmd->pool, kvp, c->raster));
+    if (err_message) return err_message;
+
+    // Output mime type
+    line = apr_table_get(kvp, "MimeType");
+    c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
+
+    // Get the planet circumference in meters, for partial coverages
+    line = apr_table_get(kvp, "Radius");
+    // Stored as radius and the inverse of circumference
+    double radius = (line) ? strtod(line, NULL) : 6378137.0;
+    c->eres = 1.0 / (2 * pi * radius);
+
+    // Sampling flags
+    c->oversample = NULL != apr_table_get(kvp, "Oversample");
+    c->nearNb = NULL != apr_table_get(kvp, "Nearest");
+
+    line = apr_table_get(kvp, "ETagSeed");
+    // Ignore the flag
+    int flag;
+    c->seed = line ? base32decode((unsigned char *)line, &flag) : 0;
+    // Set the missing tile etag, with the extra bit set
+    uint64tobase32(c->seed, c->eETag, 1);
+
+    // EmptyTile, default to nothing
+    line = apr_table_get(kvp, "EmptyTile");
+    if (line) {
+        err_message = read_empty_tile(cmd, c, line);
+        if (err_message) return err_message;
+    }
+
+    line = apr_table_get(kvp, "InputBufferSize");
+    c->max_input_size = DEFAULT_INPUT_SIZE;
+    if (line)
+        c->max_input_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
+
+    line = apr_table_get(kvp, "OutputBufferSize");
+    c->max_output_size = DEFAULT_INPUT_SIZE;
+    if (line)
+        c->max_output_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
+
+    line = apr_table_get(kvp, "SourcePath");
+    if (!line)
+        return "SourcePath directive is missing";
+    c->source = apr_pstrdup(cmd->pool, line);
+
+    line = apr_table_get(kvp, "SourcePostfix");
+    if (line)
+        c->postfix = apr_pstrdup(cmd->pool, line);
+
+    c->quality = 75.0; // Default for JPEG
+    line = apr_table_get(kvp, "Quality");
+    if (line)
+        c->quality = strtod(line, NULL);
+
+    // Set the actuall reprojection function
+    if (IS_AFFINE_SCALING(c)) c->rp = scaling_handler;
+    else if (IS_GCS2WM(c))    c->rp = gcs2wm_handler;
+    else if (IS_WM2GCS(c))    c->rp = wm2gcs_handler;
+    else return "Can't determine reprojection function";
+
+    return NULL;
+}
 
 static const command_rec cmds[] =
 {

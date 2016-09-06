@@ -82,15 +82,12 @@ const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 8 };
 
 #define DT_SIZE(T) dt_size[T]
 
-
-#if defined(APLOG_USE_MODULE)
-APLOG_USE_MODULE(reproject);
-#endif
-
 // Separate channels and level, just in case
 struct sz {
     apr_int64_t x, y, z, c, l;
 };
+
+typedef int repro(request_rec *, sz *);
 
 struct bbox_t {
     double xmin, ymin, xmax, ymax;
@@ -118,9 +115,16 @@ struct TiledRaster {
     bbox_t bbox;
 };
 
+typedef struct {
+    char *buffer;
+    int size;
+} storage_manager;
+
 struct  repro_conf {
     // http_root path of this configuration
     const char *doc_path;
+    // The reprojection function to be used, also used as an enable flag
+    repro *rp;
 
     // The output and input raster figures
     TiledRaster raster, inraster;
@@ -137,11 +141,13 @@ struct  repro_conf {
     apr_uint64_t seed;
     // Buffer for the emtpy tile etag
     char eETag[16];
+
     // Empty tile buffer, if provided
-    apr_uint32_t *empty;
+    storage_manager empty;
+//    apr_uint32_t *empty;
     // Size of empty tile, in bytes
-    apr_size_t esize;
-    apr_off_t eoffset;
+//    apr_size_t esize;
+//    apr_off_t eoffset;
 
     // Meaning depends on format
     double quality;
@@ -157,17 +163,7 @@ struct  repro_conf {
 
     // Use NearNb, not bilinear interpolation
     int nearNb;
-
-    // Is mod_reproject configured in this path
-    int enabled;
 };
-
-extern module AP_MODULE_DECLARE_DATA reproject_module;
-
-typedef struct {
-    char *buffer;
-    int size;
-} storage_manager;
 
 //
 // Any decoder needs a static place for an error message and a line stride when decoding
