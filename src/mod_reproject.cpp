@@ -2,7 +2,6 @@
  * mod_reproject.cpp
  * An AHTSE tile to tile conversion module, should do most of the functionality required by a WMS server
  * Uses a 3-4 paramter rest tile service as a data source
- * Currently not functional, working on affine scalling only (pan and zoom)
  *
  * (C) Lucian Plesea 2016
  */
@@ -493,9 +492,10 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 }
 
 
-// Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
 // Fetches and decodes all tiles between tl and br, writes output in buffer
 // aligned as a single raster
+// Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
+
 static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br, void **buffer)
 {
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
@@ -537,7 +537,8 @@ static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br,
         request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
 
         // Location of first byte of this input tile
-        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x) + input_line_width * (x - tl.x);
+        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x) 
+                + input_line_width * (x - tl.x);
 
         // Set up user agent signature, prepend the info
         const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
@@ -624,11 +625,8 @@ struct interpolation_buffer {
 
 
 //
-// Perform the actual interpolation, using the working type WT
-// IMPROVE: interpolate could reuse lines of H values.
-// IMPROVE: template over the colors, to optimize inner loop
+// Perform the actual interpolation using ilines, working type WT
 //
-
 template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpolate(
     const interpolation_buffer &src, interpolation_buffer &dst,
     iline *h = NULL, iline *v = NULL)
@@ -638,21 +636,41 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     T *s = reinterpret_cast<T *>(src.buffer);
     const int colors = static_cast<int>(dst.size.c);
     const int slw = static_cast<int>(src.size.x * colors);    // Source line size in pixels
-    // const int dlw = dst.size.x * colors; // Destination line size in pixels
+    if (1 == colors) { // single band optimization
+        for (int y = 0; y < dst.size.y; y++) {
+            unsigned int vw = v[y].w;
+            for (int x = 0; x < dst.size.x; x++) 
+            {
+                unsigned int hw = h[x].w;
+                int idx = slw * v[y].line + h[x].line; // high left index
+                WT lo = static_cast<WT>(s[idx - slw - 1]) * (256 - hw)
+                    + static_cast<WT>(s[idx - slw]) * hw;
+                WT hi = static_cast<WT>(s[idx]) * (256 - hw)
+                    + static_cast<WT>(s[idx]) * hw;
+                // Then interpolate the high and low using vertical weight
+                WT value = hi * vw + lo * (256 - vw);
+                // The value is divided by 256^2 because each interpolation is times 256
+                // Make sure the working type is large enough to eliminate overflow
+                *data++ = static_cast<T>(value / (256 * 256));
+            }
+        }
+        return;
+    }
+    // More than one band
     for (int y = 0; y < dst.size.y; y++) {
         unsigned int vw = v[y].w;
         for (int x = 0; x < dst.size.x; x++)
         {
             unsigned int hw = h[x].w;
-            int idx = slw * v[y].line + h[x].line * colors; // Top left index
+            int idx = slw * v[y].line + h[x].line * colors; // high left index
             for (int c = 0; c < colors; c++) {
-                WT hi = static_cast<WT>(s[idx + c]) * hw +
-                    static_cast<WT>(s[idx + c - colors]) * (256 - hw);
                 WT lo = static_cast<WT>(s[idx + c - slw]) * hw +
                     static_cast<WT>(s[idx + c - slw - colors]) * (256 - hw);
+                WT hi = static_cast<WT>(s[idx + c]) * hw +
+                    static_cast<WT>(s[idx + c - colors]) * (256 - hw);
                 // Then interpolate the high and low using vertical weight
                 WT value = hi * vw + lo * (256 - vw);
-                // The value is multipled by 256^2 because each interpolation is times 256
+                // The value is divided by 256^2 because each interpolation is times 256
                 // Make sure the working type is large enough to eliminate overflow
                 *data++ = static_cast<T>(value / (256 * 256));
             }
@@ -661,7 +679,7 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
 }
 
 //
-// NearNb sampling, based no ilines
+// NearNb sampling, based on ilines
 // Uses the weights to pick between two choices
 //
 
@@ -674,21 +692,21 @@ template<typename T = apr_byte_t> static void interpolateNN(
     T *s = reinterpret_cast<T *>(src.buffer);
     const int colors = static_cast<int>(dst.size.c);
 
-    // Precompute the horizontal index table, the vertical is only done once
-    std::vector<int> hidx(dst.size.x);
-    for (int i = 0; i < hidx.size(); i++)
-        hidx[i] = colors * (h[i].line - ((h[i].w < 128) ? 1 : 0));
+    // Precompute the horizontal pick table, the vertical is only used once
+    std::vector<int> hpick(dst.size.x);
+    for (int i = 0; i < hpick.size(); i++)
+        hpick[i] = colors * (h[i].line - ((h[i].w < 128) ? 1 : 0));
 
     if (colors == 1) // faster code due to fewer tests
         for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
             int vidx = src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0));
-            for (auto const &hid : hidx)
+            for (auto const &hid : hpick)
                 *data++ = s[vidx + hid];
         }
     else
         for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
             int vidx = colors * src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0));
-            for (auto const &hid : hidx)
+            for (auto const &hid : hpick)
                 for (int c = 0; c < colors; c++)
                     *data++ = s[vidx + hid + c];
         }
@@ -759,8 +777,8 @@ static int affine_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     // Adjust the interpolation tables to avoid addressing pixels outside of the bounding box
     adjust_itable(h_table, int(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
     adjust_itable(v_table, int(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
-    resample(cfg, ib, ob, h_table, v_table);
 
+    resample(cfg, ib, ob, h_table, v_table);
     return APR_SUCCESS;
 }
 
@@ -901,10 +919,10 @@ static int wm2gcs_interpolate(request_rec *r, const sz *out_tile, sz *tl, sz *br
     offset = in_bbox.ymax - in_ry / 2;
     const double out_ry = cfg->raster.rsets[out_tile->l].ry;
     for (int i = 0; i < int(ob.size.y); i++) {
-        // Latitude of center pixel for this output line
-        double lat = lat2wm(cfg->eres, out_bbox.ymax - out_ry * (i + 0.5));
+        // northing of center pixel for this output line
+        double nthing = lat2wm(cfg->eres, out_bbox.ymax - out_ry * (i + 0.5));
         // Input line position
-        double pos = (offset - lat) / in_ry;
+        double pos = (offset - nthing) / in_ry;
         // Pick the higher line
         v_table[i].line = static_cast<int>(ceil(pos));
         // Weight of high line, under 256
