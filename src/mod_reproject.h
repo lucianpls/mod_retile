@@ -82,12 +82,15 @@ const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 8 };
 
 #define DT_SIZE(T) dt_size[T]
 
+// Projection types
+typedef enum {
+    P_NONE = 0, P_AFFINE, P_GCS2WM, P_WM2GCS, P_COUNT
+} PCode;
+
 // Separate channels and level, just in case
 struct sz {
     apr_int64_t x, y, z, c, l;
 };
-
-typedef int repro(request_rec *, sz *);
 
 struct bbox_t {
     double xmin, ymin, xmax, ymax;
@@ -123,8 +126,9 @@ typedef struct {
 struct  repro_conf {
     // http_root path of this configuration
     const char *doc_path;
+
     // The reprojection function to be used, also used as an enable flag
-    repro *rp;
+    PCode code;
 
     // The output and input raster figures
     TiledRaster raster, inraster;
@@ -144,10 +148,6 @@ struct  repro_conf {
 
     // Empty tile buffer, if provided
     storage_manager empty;
-//    apr_uint32_t *empty;
-    // Size of empty tile, in bytes
-//    apr_size_t esize;
-//    apr_off_t eoffset;
 
     // Meaning depends on format
     double quality;
@@ -163,6 +163,20 @@ struct  repro_conf {
 
     // Use NearNb, not bilinear interpolation
     int nearNb;
+};
+
+struct work {
+    repro_conf *c;
+    // Output bbox
+    bbox_t out_bbox;
+    // Output bbox in input projection
+    bbox_t out_equiv_bbox;
+    // Input bounding box
+    bbox_t in_bbox;
+    // Output tile
+    sz out_tile;
+    // Input tile range
+    sz tl, br;
 };
 
 //
