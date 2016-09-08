@@ -696,6 +696,14 @@ void resample(const repro_conf *cfg, const interpolation_buffer &src, interpolat
     }
 }
 
+// first param is reverse of radius, second is input coordinate
+typedef double coord_conv_f(double, double);
+
+// Identical projection coordinate conversion
+static double same_proj(double, double c) {
+    return c;
+}
+
 // Web mercator X to longitude in degrees
 static double wm2lon(double eres, double x) {
     return 360 * eres * x;
@@ -704,14 +712,6 @@ static double wm2lon(double eres, double x) {
 // Web mercator Y to latitude in degrees
 static double wm2lat(double eres, double y) {
     return 90 * (1 - 4 / pi * atan(exp(eres * pi * 2 * -y)));
-}
-
-// Convert WM bbox to GCS bbox in degrees
-static void bbox_wm2gcs(double eres, const bbox_t &wm_bbox, bbox_t &gcs_bbox) {
-    gcs_bbox.xmin = wm2lon(eres, wm_bbox.xmin);
-    gcs_bbox.ymin = wm2lat(eres, wm_bbox.ymin);
-    gcs_bbox.xmax = wm2lon(eres, wm_bbox.xmax);
-    gcs_bbox.ymax = wm2lat(eres, wm_bbox.ymax);
 }
 
 static double lon2wm(double eres, double lon) {
@@ -725,112 +725,38 @@ static double lat2wm(double eres, double lat) {
     return (lat > 85) ? (0.5 / eres) : (-0.5 / eres);
 }
 
-// Convert GCS bbox to WM
-static void bbox_gcs2wm(double eres, const bbox_t &gcs_bbox, bbox_t &wm_bbox) {
-    wm_bbox.xmin = lon2wm(eres, gcs_bbox.xmin);
-    wm_bbox.ymin = lat2wm(eres, gcs_bbox.ymin);
-    wm_bbox.xmax = lon2wm(eres, gcs_bbox.xmax);
-    wm_bbox.ymax = lat2wm(eres, gcs_bbox.ymax);
-}
-
-// Functions to convert the output bounding box to input equivalent projection system
-typedef void bb_eq_func(work &);
-
-static void bb_scale(work &info) {
-   // Input is the same projection as output
-    info.out_equiv_bbox = info.out_bbox;
-}
-
-// For the output gcs, convert the bbox to equivalent WM
-static void bb_wm2gcs(work &info) {
-    bbox_gcs2wm(info.c->eres, info.out_bbox, info.out_equiv_bbox);
-}
-
-// For the output wm, convert the bbox to equivalent GCS
-static void bb_gcs2wm(work &info) {
-    bbox_wm2gcs(info.c->eres, info.out_bbox, info.out_equiv_bbox);
-}
-
-// Functions that compute the interpolation lines
-typedef void iline_func(work &, iline *table);
-
 // The x dimension is most of the time linear, convenience function
-static void linear_x(work &info, iline *table) {
-    const double out_rx = info.c->raster.rsets[info.out_tile.l].rx;
-    const double in_rx = info.c->inraster.rsets[info.tl.l].rx;
-    const double offset_x = info.out_equiv_bbox.xmin - info.in_bbox.xmin + 0.5 * (out_rx - in_rx);
-    const int size_x = info.c->raster.pagesize.x;
-    const int max_column = info.c->inraster.pagesize.x * (info.br.x - info.tl.x) - 1;
-
-    init_ilines(in_rx, out_rx, offset_x, table, size_x);
-    adjust_itable(table, size_x, max_column);
+static void prep_x(work &info, iline *table) {
+    bbox_t &bbox = info.out_equiv_bbox;
+    const double out_r = (bbox.xmax - bbox.xmin) / info.c->raster.pagesize.x;
+    const double in_r = info.c->inraster.rsets[info.tl.l].rx;
+    const double offset = bbox.xmin - info.in_bbox.xmin + 0.5 * (out_r - in_r);
+    init_ilines(in_r, out_r, offset, table, info.c->raster.pagesize.x);
 }
 
-// The iline_func for linear scaling, does the same thing for x and for y
-static void scale_iline(work &info, iline *table) {
-    linear_x(info, table);
-    // Y
-    const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
-    const double in_ry = info.c->inraster.rsets[info.tl.l].ry;
-    const double offset_y = info.in_bbox.ymax - info.out_equiv_bbox.ymax + 0.5 * (out_ry - in_ry);
-    iline *t_y = table + info.c->raster.pagesize.x;
-    const int size_y = info.c->raster.pagesize.y;
-    const int max_line = info.c->inraster.pagesize.y * (info.br.y - info.tl.y) - 1;
-
-    init_ilines(in_ry, out_ry, offset_y, t_y, size_y);
-    adjust_itable(t_y, size_y, max_line);
-}
-
-// The iline_func for gcs2wm
-static void gcs2wm_iline(work &info, iline *table) {
-    linear_x(info, table);
-    // Y
-    const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
-    const double in_ry = info.c->inraster.rsets[info.tl.l].ry;
-    const int size_y = info.c->raster.pagesize.y;
-    iline *t_y = table + info.c->raster.pagesize.x;
-    double offset_y = info.in_bbox.ymax - 0.5 * in_ry;
-    const int max_line = info.c->inraster.pagesize.y * (info.br.y - info.tl.y) - 1;
+// Initialize ilines for y
+// coord_f is the function converting from output coordinates to input
+static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
     const double eres = info.c->eres;
-    for (int i = 0; i < size_y; i++) {
-        // Latitude of pixel center for this output line
-        const double lat = wm2lat(eres, info.out_bbox.ymax - out_ry * (i + 0.5));
-        // Input line center
-        const double pos = (offset_y - lat) / in_ry;
+    const int size = info.c->raster.pagesize.y;
+    const double out_r = (info.out_bbox.ymax - info.out_bbox.ymin) / size;
+    const double in_r = info.c->inraster.rsets[info.tl.l].ry;
+    double offset = info.in_bbox.ymax - 0.5 * in_r;
+    for (int i = 0; i < size; i++) {
+        // Coordinate of output line in input projection
+        const double coord = coord_f(eres, info.out_bbox.ymax - out_r * (i + 0.5));
+        // Same in pixels
+        const double pos = (offset - coord) / in_r;
         // Pick the higher line
-        t_y[i].line = static_cast<int>(ceil(pos));
-        t_y[i].w = static_cast<int>(floor(256 * (pos - floor(pos))));
+        table[i].line = static_cast<int>(ceil(pos));
+        table[i].w = static_cast<int>(floor(256 * (pos - floor(pos))));
     }
-    adjust_itable(t_y, size_y, max_line);
-}
-
-// The iline_func for wm2gcs
-static void wm2gcs_iline(work &info, iline *table) {
-    linear_x(info, table);
-    // Y
-    const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
-    const double in_ry = info.c->inraster.rsets[info.tl.l].ry;
-    const int size_y = info.c->raster.pagesize.y;
-    iline *t_y = table + info.c->raster.pagesize.x;
-    double offset_y = info.in_bbox.ymax - 0.5 * in_ry;
-    const int max_line = info.c->inraster.pagesize.y * (info.br.y - info.tl.y) - 1;
-    const double eres = info.c->eres;
-    for (int i = 0; i < size_y; i++) {
-        // Northing of pixel center for this output line
-        const double wm_y = lat2wm(eres, info.out_bbox.ymax - out_ry * (i + 0.5));
-        // Input line center
-        const double pos = (offset_y - wm_y) / in_ry;
-        // Pick the higher line
-        t_y[i].line = static_cast<int>(ceil(pos));
-        t_y[i].w = static_cast<int>(floor(256 * (pos - floor(pos))));
-    }
-    adjust_itable(t_y, size_y, max_line);
 }
 
 static bool our_request(request_rec *r, repro_conf *cfg) {
     if (r->method_number != M_GET) return false;
 
-    if (!cfg->regexp || cfg->code <= P_NONE || cfg->code >= P_COUNT) return false;
+    if (!cfg->regexp || cfg->code >= P_COUNT) return false;
     char *url_to_match = r->args ? apr_pstrcat(r->pool, r->uri, "?", r->args, NULL) : r->uri;
     for (int i = 0; i < cfg->regexp->nelts; i++) {
         ap_regex_t *m = &APR_ARRAY_IDX(cfg->regexp, i, ap_regex_t);
@@ -843,8 +769,8 @@ static int handler(request_rec *r)
 {
     // Tables of reprojection code dependent functions, to dispatch on
     // Could be done with a switch, this is more compact and easier to extend
-    static const bb_eq_func *box_equiv[P_COUNT] = { NULL, bb_scale, bb_gcs2wm, bb_wm2gcs };
-    static const iline_func *calc_itables[P_COUNT] = { NULL, scale_iline, gcs2wm_iline, wm2gcs_iline };
+    static const coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm };
+    static const coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm };
 
     // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
@@ -853,11 +779,11 @@ static int handler(request_rec *r)
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
-    // Use a xyzc structure, with c being the level
-    // Input order is M/Level/Row/Column, with M being optional
-    struct sz tile;
+    work info;
+    struct sz &tile = info.out_tile;
     memset(&tile, 0, sizeof(tile));
 
+    // Input order is M/Level/Row/Column, with M being optional
     // Need at least three numerical arguments
     tile.x = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
     tile.y = apr_atoi64(*(char **)apr_array_pop(tokens)); REQ_ERR_IF(errno);
@@ -884,13 +810,15 @@ static int handler(request_rec *r)
     // Need to have mod_receive available
     SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
 
-    work info;
-    info.out_tile = tile;
     double out_rx = cfg->raster.rsets[tile.l].rx;
     tile_to_bbox(cfg->raster, &(info.out_tile), info.out_bbox);
 
     // calculate the input projection equivalent bbox
-    box_equiv[cfg->code](info);
+    info.out_equiv_bbox.xmin = cxf[cfg->code](cfg->eres, info.out_bbox.xmin);
+    info.out_equiv_bbox.xmax = cxf[cfg->code](cfg->eres, info.out_bbox.xmax);
+    info.out_equiv_bbox.ymin = cyf[cfg->code](cfg->eres, info.out_bbox.ymin);
+    info.out_equiv_bbox.ymax = cyf[cfg->code](cfg->eres, info.out_bbox.ymax);
+
     double out_equiv_rx = (info.out_equiv_bbox.xmax - info.out_equiv_bbox.xmin)
         / cfg->raster.pagesize.x;
 
@@ -906,7 +834,7 @@ static int handler(request_rec *r)
     void *buffer = NULL;
     apr_status_t status = retrieve_source(r, info.tl, info.br, &buffer);
     if (APR_SUCCESS != status) return status;
-    // Convert back to absolute level for input tiles
+    // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
 
     // Outgoing raw tile buffer
@@ -922,15 +850,17 @@ static int handler(request_rec *r)
     ib.size.y *= (info.br.y - info.tl.y);
     interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize };
 
-    // Use a single vector to hold the interpolation tables for both x and y
-//    std::vector<iline> table(ob.size.x + ob.size.y);
     iline *table = static_cast<iline *>(apr_palloc(r->pool, sizeof(iline)*(ob.size.x + ob.size.y)));
+    iline *ytable = table + ob.size.x;
 
-    // Compute the iline values, depending on the projection
-    calc_itables[cfg->code](info, table);
+    // The x dimension scaling is always linear
+    prep_x(info, table);
+    adjust_itable(table, ob.size.x, ib.size.x - 1);
+    prep_y(info, ytable, cyf[cfg->code]);
+    adjust_itable(ytable, ob.size.y, ib.size.y - 1);
 
-    // Perform the resampling
-    resample(cfg, ib, ob, table, table + ob.size.x);
+    // Perform the actual resampling
+    resample(cfg, ib, ob, table, ytable);
 
     // A buffer for the output tile
     storage_manager dst;
@@ -1064,8 +994,7 @@ static const command_rec cmds[] =
     { NULL }
 };
 
-static void register_hooks(apr_pool_t *p)
-{
+static void register_hooks(apr_pool_t *p) {
     ap_hook_handler(handler, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
