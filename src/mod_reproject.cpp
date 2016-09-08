@@ -6,15 +6,15 @@
  * (C) Lucian Plesea 2016
  */
 
+// TODO: Test
 // TODO: Handle ETag conditional requests
-// TODO: Implement GCS to and from WM.  This is partly done, but should reuse more code, use classes?
+// TODO: Implement GCS to and from WM.
 // TODO: Add LERC support
 // TODO: Allow overlap between tiles
 
 #include "mod_reproject.h"
 #include <cmath>
 #include <clocale>
-#include <algorithm>
 #include <vector>
 #include <cctype>
 
@@ -752,82 +752,79 @@ static void bb_gcs2wm(work &info) {
 }
 
 // Functions that compute the interpolation lines
-typedef void iline_func(work &, std::vector<iline> &table);
+typedef void iline_func(work &, iline *table);
 
 // The x dimension is most of the time linear, convenience function
-static void linear_x(work &info, std::vector<iline> &table) {
+static void linear_x(work &info, iline *table) {
     const double out_rx = info.c->raster.rsets[info.out_tile.l].rx;
-    const double in_rx = info.c->inraster.rsets[info.tl.l + info.c->inraster.skip].rx;
+    const double in_rx = info.c->inraster.rsets[info.tl.l].rx;
     const double offset_x = info.out_equiv_bbox.xmin - info.in_bbox.xmin + 0.5 * (out_rx - in_rx);
-    iline *t_x = table.data();
     const int size_x = info.c->raster.pagesize.x;
-    const int num_input_columns = info.c->inraster.pagesize.x * (info.br.x - info.tl.x);
+    const int max_column = info.c->inraster.pagesize.x * (info.br.x - info.tl.x) - 1;
 
-    init_ilines(in_rx, out_rx, offset_x, t_x, size_x);
-    adjust_itable(t_x, size_x, num_input_columns - 1);
+    init_ilines(in_rx, out_rx, offset_x, table, size_x);
+    adjust_itable(table, size_x, max_column);
 }
 
 // The iline_func for linear scaling, does the same thing for x and for y
-static void scale_iline(work &info, std::vector<iline> &table) {
-    linear_x(info, table);
-
-    const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
-    const double in_ry = info.c->inraster.rsets[info.tl.l + info.c->inraster.skip].ry;
-    const double offset_y = info.in_bbox.ymax - info.out_equiv_bbox.ymax + 0.5 * (out_ry - in_ry);
-    iline *t_y = table.data() + info.c->raster.pagesize.x;
-    const int size_y = info.c->raster.pagesize.y;
-    const int num_input_lines = info.c->inraster.pagesize.y * (info.br.y - info.tl.y);
-
-    init_ilines(in_ry, out_ry, offset_y, t_y, size_y);
-    adjust_itable(t_y, size_y, num_input_lines - 1);
-}
-
-// The iline_func for gcs2wm
-static void gcs2wm_iline(work &info, std::vector<iline> &table) {
-    // X is linear
+static void scale_iline(work &info, iline *table) {
     linear_x(info, table);
     // Y
     const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
-    const double in_ry = info.c->inraster.rsets[info.tl.l + info.c->inraster.skip].ry;
+    const double in_ry = info.c->inraster.rsets[info.tl.l].ry;
+    const double offset_y = info.in_bbox.ymax - info.out_equiv_bbox.ymax + 0.5 * (out_ry - in_ry);
+    iline *t_y = table + info.c->raster.pagesize.x;
     const int size_y = info.c->raster.pagesize.y;
-    iline *t_y = table.data() + info.c->raster.pagesize.x;
+    const int max_line = info.c->inraster.pagesize.y * (info.br.y - info.tl.y) - 1;
+
+    init_ilines(in_ry, out_ry, offset_y, t_y, size_y);
+    adjust_itable(t_y, size_y, max_line);
+}
+
+// The iline_func for gcs2wm
+static void gcs2wm_iline(work &info, iline *table) {
+    linear_x(info, table);
+    // Y
+    const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
+    const double in_ry = info.c->inraster.rsets[info.tl.l].ry;
+    const int size_y = info.c->raster.pagesize.y;
+    iline *t_y = table + info.c->raster.pagesize.x;
     double offset_y = info.in_bbox.ymax - 0.5 * in_ry;
-    const int num_input_lines = info.c->inraster.pagesize.y * (info.br.y - info.tl.y);
+    const int max_line = info.c->inraster.pagesize.y * (info.br.y - info.tl.y) - 1;
     const double eres = info.c->eres;
     for (int i = 0; i < size_y; i++) {
-        // Latitude of center pixel for this output line
+        // Latitude of pixel center for this output line
         const double lat = wm2lat(eres, info.out_bbox.ymax - out_ry * (i + 0.5));
-        // Input line position
+        // Input line center
         const double pos = (offset_y - lat) / in_ry;
         // Pick the higher line
         t_y[i].line = static_cast<int>(ceil(pos));
         t_y[i].w = static_cast<int>(floor(256 * (pos - floor(pos))));
     }
-    adjust_itable(t_y, size_y, num_input_lines - 1);
+    adjust_itable(t_y, size_y, max_line);
 }
 
 // The iline_func for wm2gcs
-static void wm2gcs_iline(work &info, std::vector<iline> &table) {
-    // X is linear
+static void wm2gcs_iline(work &info, iline *table) {
     linear_x(info, table);
     // Y
     const double out_ry = info.c->raster.rsets[info.out_tile.l].ry;
-    const double in_ry = info.c->inraster.rsets[info.tl.l + info.c->inraster.skip].ry;
+    const double in_ry = info.c->inraster.rsets[info.tl.l].ry;
     const int size_y = info.c->raster.pagesize.y;
-    iline *t_y = table.data() + info.c->raster.pagesize.x;
+    iline *t_y = table + info.c->raster.pagesize.x;
     double offset_y = info.in_bbox.ymax - 0.5 * in_ry;
-    const int num_input_lines = info.c->inraster.pagesize.y * (info.br.y - info.tl.y);
+    const int max_line = info.c->inraster.pagesize.y * (info.br.y - info.tl.y) - 1;
     const double eres = info.c->eres;
     for (int i = 0; i < size_y; i++) {
-        // Latitude of center pixel for this output line
+        // Northing of pixel center for this output line
         const double wm_y = lat2wm(eres, info.out_bbox.ymax - out_ry * (i + 0.5));
-        // Input line position
+        // Input line center
         const double pos = (offset_y - wm_y) / in_ry;
         // Pick the higher line
         t_y[i].line = static_cast<int>(ceil(pos));
         t_y[i].w = static_cast<int>(floor(256 * (pos - floor(pos))));
     }
-    adjust_itable(t_y, size_y, num_input_lines - 1);
+    adjust_itable(t_y, size_y, max_line);
 }
 
 static bool our_request(request_rec *r, repro_conf *cfg) {
@@ -847,7 +844,7 @@ static int handler(request_rec *r)
     // Tables of reprojection code dependent functions, to dispatch on
     // Could be done with a switch, this is more compact and easier to extend
     static const bb_eq_func *box_equiv[P_COUNT] = { NULL, bb_scale, bb_gcs2wm, bb_wm2gcs };
-    static const iline_func *calc_iline[P_COUNT] = { NULL, scale_iline, gcs2wm_iline, wm2gcs_iline };
+    static const iline_func *calc_itables[P_COUNT] = { NULL, scale_iline, gcs2wm_iline, wm2gcs_iline };
 
     // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
@@ -909,6 +906,8 @@ static int handler(request_rec *r)
     void *buffer = NULL;
     apr_status_t status = retrieve_source(r, info.tl, info.br, &buffer);
     if (APR_SUCCESS != status) return status;
+    // Convert back to absolute level for input tiles
+    info.tl.l = info.br.l = input_l;
 
     // Outgoing raw tile buffer
     int pixel_size = cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype);
@@ -924,13 +923,14 @@ static int handler(request_rec *r)
     interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize };
 
     // Use a single vector to hold the interpolation tables for both x and y
-    std::vector<iline> table(ob.size.x + ob.size.y);
+//    std::vector<iline> table(ob.size.x + ob.size.y);
+    iline *table = static_cast<iline *>(apr_palloc(r->pool, sizeof(iline)*(ob.size.x + ob.size.y)));
 
     // Compute the iline values, depending on the projection
-    calc_iline[cfg->code](info, table);
+    calc_itables[cfg->code](info, table);
 
     // Perform the resampling
-    resample(cfg, ib, ob, table.data(), table.data() + ob.size.x);
+    resample(cfg, ib, ob, table, table + ob.size.x);
 
     // A buffer for the output tile
     storage_manager dst;
