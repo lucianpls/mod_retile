@@ -4,7 +4,7 @@ OBJECTS = $(FILES:.cpp=.lo)
 
 DEFINES = -DLINUX -D_REENTRANT -D_GNU_SOURCE
 
-LIBS = -ljpeg
+LIBS = -ljpeg -lpng
 
 # Create Makefile.lcl, which should define
 # MOD_PATH, the folder where the apache module should reside

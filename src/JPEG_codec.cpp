@@ -69,7 +69,7 @@ const char *jpeg_stride_decode(codec_params &params, const TiledRaster &raster, 
     jpeg_decompress_struct cinfo;
     char *message = NULL;
     ErrorMgr err;
-    struct jpeg_source_mgr s = { (JOCTET *)src.buffer, src.size };
+    struct jpeg_source_mgr s = { (JOCTET *)src.buffer, static_cast<size_t>(src.size) };
 
     cinfo.err = &err;
     s.term_source = s.init_source = stub_source_dec;

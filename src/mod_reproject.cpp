@@ -353,12 +353,6 @@ static bool is_wm(const char *projection) {
         || !apr_strnatcasecmp(projection, "EPSG:3785");
 }
 
-// Is the projection WGS84 based mercator
-static bool is_mercator(const char *projection) {
-    return !apr_strnatcasecmp(projection, "Mercator")
-        || !apr_strnatcasecmp(projection, "EPSG:3395");
-}
-
 // If projection is the same, the transformation is an affine scaling
 #define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
 #define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
@@ -794,7 +788,8 @@ static int handler(request_rec *r)
 
     work info;
     info.c = cfg;
-    struct sz &tile = info.out_tile;
+    sz &tile = info.out_tile;
+    bbox_t &oebb = info.out_equiv_bbox;
     memset(&tile, 0, sizeof(tile));
 
     // Input order is M/Level/Row/Column, with M being optional
@@ -824,21 +819,17 @@ static int handler(request_rec *r)
     // Need to have mod_receive available
     SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
 
-    double out_rx = cfg->raster.rsets[tile.l].rx;
     tile_to_bbox(cfg->raster, &(info.out_tile), info.out_bbox);
-
     // calculate the input projection equivalent bbox
-    info.out_equiv_bbox.xmin = cxf[cfg->code](cfg->eres, info.out_bbox.xmin);
-    info.out_equiv_bbox.xmax = cxf[cfg->code](cfg->eres, info.out_bbox.xmax);
-    info.out_equiv_bbox.ymin = cyf[cfg->code](cfg->eres, info.out_bbox.ymin);
-    info.out_equiv_bbox.ymax = cyf[cfg->code](cfg->eres, info.out_bbox.ymax);
-
-    double out_equiv_rx = (info.out_equiv_bbox.xmax - info.out_equiv_bbox.xmin)
-        / cfg->raster.pagesize.x;
+    oebb.xmin = cxf[cfg->code](cfg->eres, info.out_bbox.xmin);
+    oebb.xmax = cxf[cfg->code](cfg->eres, info.out_bbox.xmax);
+    oebb.ymin = cyf[cfg->code](cfg->eres, info.out_bbox.ymin);
+    oebb.ymax = cyf[cfg->code](cfg->eres, info.out_bbox.ymax);
+    double out_equiv_rx = (oebb.xmax - oebb.xmin)/ cfg->raster.pagesize.x;
 
     // Pick the input level
     int input_l = input_level(cfg->inraster, out_equiv_rx, cfg->oversample);
-    bbox_to_tile(cfg->inraster, input_l, info.out_equiv_bbox, &info.tl, &info.br);
+    bbox_to_tile(cfg->inraster, input_l, oebb, &info.tl, &info.br);
     info.tl.z = info.br.z = info.out_tile.z;
     info.tl.c = info.br.c = cfg->inraster.pagesize.c;
     info.tl.l = info.br.l = input_l;
