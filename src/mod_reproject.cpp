@@ -34,6 +34,21 @@ const static double pi = acos(-1.0);
 
 #define USER_AGENT "AHTSE Reproject"
 
+// A structure for the coordinate information used in the current tile conversion
+struct work {
+    repro_conf *c;
+    // Output bbox
+    bbox_t out_bbox;
+    // Output bbox in input projection
+    bbox_t out_equiv_bbox;
+    // Input bounding box
+    bbox_t in_bbox;
+    // Output tile
+    sz out_tile;
+    // Input tile range
+    sz tl, br;
+};
+
 // Given a data type name, returns a data type
 static GDALDataType GetDT(const char *name) {
     if (name == NULL) return GDT_Byte;
@@ -448,14 +463,14 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
     if (y - br_tile->y > 0.5 / raster.pagesize.y) br_tile->y++;
 }
 
-
 // Fetches and decodes all tiles between tl and br, writes output in buffer
 // aligned as a single raster
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
 
-static apr_status_t retrieve_source(request_rec *r, const  sz &tl, const sz &br, void **buffer)
+static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 {
-    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
+    const  sz &tl = info.tl, &br = info.br;
+    repro_conf *cfg = info.c;
     const char *error_message;
 
     int ntiles = int((br.x - tl.x) * (br.y - tl.y));
@@ -586,49 +601,46 @@ struct interpolation_buffer {
 //
 template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpolate(
     const interpolation_buffer &src, interpolation_buffer &dst,
-    iline *h = NULL, iline *v = NULL)
+    const iline *h, const iline *v)
 {
-    ap_assert(src.size.c == dst.size.c); // Same number of colors
+    const int colors = static_cast<int>(dst.size.c);
+    ap_assert(src.size.c == colors); // Same number of colors
     T *data = reinterpret_cast<T *>(dst.buffer);
     T *s = reinterpret_cast<T *>(src.buffer);
-    const int colors = static_cast<int>(dst.size.c);
-    const int slw = static_cast<int>(src.size.x * colors);    // Source line size in pixels
-    if (1 == colors) { // single band optimization
+    const int slw = static_cast<int>(src.size.x * colors);
+
+    // single band optimization
+    if (1 == colors) { 
         for (int y = 0; y < dst.size.y; y++) {
-            unsigned int vw = v[y].w;
+            const WT vw = v[y].w;
             for (int x = 0; x < dst.size.x; x++) 
             {
-                unsigned int hw = h[x].w;
-                int idx = slw * v[y].line + h[x].line; // high left index
-                WT lo = static_cast<WT>(s[idx - slw - 1]) * (256 - hw)
+                const WT hw = h[x].w;
+                const int idx = slw * v[y].line + h[x].line; // high left index
+                const WT lo = static_cast<WT>(s[idx - slw - 1]) * (256 - hw)
                     + static_cast<WT>(s[idx - slw]) * hw;
-                WT hi = static_cast<WT>(s[idx]) * (256 - hw)
+                const WT hi = static_cast<WT>(s[idx - 1]) * (256 - hw)
                     + static_cast<WT>(s[idx]) * hw;
-                // Then interpolate the high and low using vertical weight
-                WT value = hi * vw + lo * (256 - vw);
-                // The value is divided by 256^2 because each interpolation is times 256
-                // Make sure the working type is large enough to eliminate overflow
+                const WT value = hi * vw + lo * (256 - vw);
                 *data++ = static_cast<T>(value / (256 * 256));
             }
         }
         return;
     }
+
     // More than one band
-    for (int y = 0; y < dst.size.y; y++) {
-        unsigned int vw = v[y].w;
+    for (int y = 0; y < dst.size.y; y++) {    
+        const WT vw = v[y].w;
         for (int x = 0; x < dst.size.x; x++)
         {
-            unsigned int hw = h[x].w;
+            const WT hw = h[x].w;
             int idx = slw * v[y].line + h[x].line * colors; // high left index
             for (int c = 0; c < colors; c++) {
-                WT lo = static_cast<WT>(s[idx + c - slw]) * hw +
+                const WT lo = static_cast<WT>(s[idx + c - slw]) * hw +
                     static_cast<WT>(s[idx + c - slw - colors]) * (256 - hw);
-                WT hi = static_cast<WT>(s[idx + c]) * hw +
+                const WT hi = static_cast<WT>(s[idx + c]) * hw +
                     static_cast<WT>(s[idx + c - colors]) * (256 - hw);
-                // Then interpolate the high and low using vertical weight
-                WT value = hi * vw + lo * (256 - vw);
-                // The value is divided by 256^2 because each interpolation is times 256
-                // Make sure the working type is large enough to eliminate overflow
+                const WT value = hi * vw + lo * (256 - vw);
                 *data++ = static_cast<T>(value / (256 * 256));
             }
         }
@@ -642,7 +654,7 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
 
 template<typename T = apr_byte_t> static void interpolateNN(
     const interpolation_buffer &src, interpolation_buffer &dst,
-    iline *h, iline *v)
+    const iline *h, const iline *v)
 {
     ap_assert(src.size.c == dst.size.c);
     T *data = reinterpret_cast<T *>(dst.buffer);
@@ -672,9 +684,10 @@ template<typename T = apr_byte_t> static void interpolateNN(
 }
 
 // Calls the interpolation for the right data type
-void resample(const repro_conf *cfg, const interpolation_buffer &src, interpolation_buffer &dst,
-    iline *h, iline *v)
+void resample(const repro_conf *cfg, const iline *h,
+    const interpolation_buffer &src, interpolation_buffer &dst)
 {
+    const iline *v = h + dst.size.x;
     switch (cfg->raster.datatype) {
     case GDT_UInt16:
         if (cfg->nearNb)
@@ -780,6 +793,7 @@ static int handler(request_rec *r)
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
     work info;
+    info.c = cfg;
     struct sz &tile = info.out_tile;
     memset(&tile, 0, sizeof(tile));
 
@@ -827,12 +841,15 @@ static int handler(request_rec *r)
     bbox_to_tile(cfg->inraster, input_l, info.out_equiv_bbox, &info.tl, &info.br);
     info.tl.z = info.br.z = info.out_tile.z;
     info.tl.c = info.br.c = cfg->inraster.pagesize.c;
-    info.tl.l = info.br.l = input_l - cfg->inraster.skip;
+    info.tl.l = info.br.l = input_l;
     tile_to_bbox(info.c->inraster, &info.tl, info.in_bbox);
+    // Use relative level to request the data
+    info.tl.l -= cfg->inraster.skip;
+    info.br.l -= cfg->inraster.skip;
 
     // Incoming tiles buffer
     void *buffer = NULL;
-    apr_status_t status = retrieve_source(r, info.tl, info.br, &buffer);
+    apr_status_t status = retrieve_source(r, info, &buffer);
     if (APR_SUCCESS != status) return status;
     // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
@@ -860,7 +877,7 @@ static int handler(request_rec *r)
     adjust_itable(ytable, ob.size.y, ib.size.y - 1);
 
     // Perform the actual resampling
-    resample(cfg, ib, ob, table, ytable);
+    resample(cfg, table, ib, ob);
 
     // A buffer for the output tile
     storage_manager dst;

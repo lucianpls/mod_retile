@@ -165,20 +165,6 @@ struct  repro_conf {
     int nearNb;
 };
 
-struct work {
-    repro_conf *c;
-    // Output bbox
-    bbox_t out_bbox;
-    // Output bbox in input projection
-    bbox_t out_equiv_bbox;
-    // Input bounding box
-    bbox_t in_bbox;
-    // Output tile
-    sz out_tile;
-    // Input tile range
-    sz tl, br;
-};
-
 //
 // Any decoder needs a static place for an error message and a line stride when decoding
 // This structure is accepted by the decoders, regardless of type
