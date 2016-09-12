@@ -8,7 +8,6 @@
 
 // TODO: Test
 // TODO: Handle ETag conditional requests
-// TODO: Implement GCS to and from WM.
 // TODO: Add LERC support
 // TODO: Allow overlap between tiles
 
@@ -47,6 +46,8 @@ struct work {
     sz out_tile;
     // Input tile range
     sz tl, br;
+    // Numerical ETag
+    apr_uint64_t seed;
 };
 
 // Given a data type name, returns a data type
@@ -87,7 +88,6 @@ static int send_image(request_rec *r, const storage_manager &src, const char *mi
     if (GZIP_SIG == hton32(*src.buffer))
         apr_table_setn(r->headers_out, "Content-Encoding", "gzip");
 
-    // TODO: Set headers, as chosen by user
     ap_set_content_length(r, src.size);
     ap_rwrite(src.buffer, src.size, r);
     return OK;
@@ -121,15 +121,18 @@ static void uint64tobase32(apr_uint64_t value, char *buffer, int flag = 0) {
     static char b32digits[] = "0123456789abcdefghijklmnopqrstuv";
     // From the bottom up
     buffer[13] = 0; // End of string marker
-    for (int i = 0; i < 13; i++, value >>= 5)
+    for (int i = 0; i < 12; i++, value >>= 5)
         buffer[12 - i] = b32digits[value & 0x1f];
-    buffer[0] |= flag << 4; // empty flag goes in top bit
+    // First char holds the empty tile flag
+    if (flag) flag = 0x10; // Making sure it has the right value
+    buffer[0] = b32digits[flag | value];
 }
 
 // Return the value from a base 32 character
 // Returns a negative value if char is not a valid base32 char
 // ASCII only
-static int b32(unsigned char c) {
+static int b32(char ic) {
+    int c = 0xff & (static_cast<int>(ic));
     if (c < '0') return -1;
     if (c - '0' < 10) return c - '0';
     if (c < 'A') return -1;
@@ -139,8 +142,9 @@ static int b32(unsigned char c) {
     return -1;
 }
 
-static apr_uint64_t base32decode(unsigned char *s, int *flag) {
+static apr_uint64_t base32decode(const char *is, int *flag) {
     apr_int64_t value = 0;
+    const unsigned char *s = reinterpret_cast<const unsigned char *>(is);
     while (*s == '"') s++; // Skip initial quotes
     *flag = (b32(*s) >> 4 ) & 1; // Pick up the flag from bit 5
     for (int v = b32(*s++) & 0xf; v >= 0; v = b32(*s++))
@@ -403,7 +407,6 @@ static int send_empty_tile(request_rec *r) {
 }
 
 // Pick an input level based on desired output resolution
-// TODO: Consider the Y resolution too
 static int input_level(const TiledRaster &raster, double res, int over) {
     // The raster levels are in increasing resolution order, test until 
     for (int choice = 0; choice < raster.n_levels; choice++) {
@@ -465,6 +468,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 {
     const  sz &tl = info.tl, &br = info.br;
     repro_conf *cfg = info.c;
+    apr_uint64_t &etag_out = info.seed;
     const char *error_message;
 
     int ntiles = int((br.x - tl.x) * (br.y - tl.y));
@@ -491,6 +495,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
+    int tile_count = 0;
 
     // Retrieve every required tile and decompress it in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
@@ -519,6 +524,29 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri);
             return rr_status; // Pass status along
         }
+
+        const char *ETagIn = apr_table_get(r->headers_out, "ETag");
+        apr_uint64_t etag;
+        int empty_flag = 0;
+        if (nullptr != ETagIn) {
+            etag = base32decode(ETagIn, &empty_flag);
+            if (empty_flag) continue; // Ignore empty input tiles
+        }
+        else { // Input came without an ETag, make one up
+            etag = rctx.size; // Start with the input tile size
+            // And pick some data out of the input buffer, towards the end
+            if (rctx.size > 50) {
+                char *tptr = rctx.buffer + rctx.size - 24; // Temporary pointer
+                tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
+                etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+                tptr = rctx.buffer + rctx.size - 35; // Temporary pointer
+                tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
+                etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+            }
+        }
+        // Build up the outgoing ETag
+        etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag one byte left
+        etag_out ^= etag; // And combine it with the incoming tile etag
 
 	storage_manager src = { rctx.buffer, rctx.size };
         apr_uint32_t sig;
@@ -776,6 +804,7 @@ static int handler(request_rec *r)
 {
     // Tables of reprojection code dependent functions, to dispatch on
     // Could be done with a switch, this is more compact and easier to extend
+    // The order has to match the PCode definitions
     static const coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm };
     static const coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm };
 
@@ -788,6 +817,7 @@ static int handler(request_rec *r)
 
     work info;
     info.c = cfg;
+    info.seed = cfg->seed;
     sz &tile = info.out_tile;
     bbox_t &oebb = info.out_equiv_bbox;
     memset(&tile, 0, sizeof(tile));
@@ -845,6 +875,13 @@ static int handler(request_rec *r)
     // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
 
+    // Check the etag match before preparing output
+    char ETag[16];
+    uint64tobase32(info.seed, ETag, info.seed == cfg->seed);
+    apr_table_set(r->headers_out, "ETag", ETag);
+    if (etag_matches(r, ETag))
+        return HTTP_NOT_MODIFIED;
+
     // Outgoing raw tile buffer
     int pixel_size = cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype);
     storage_manager raw;
@@ -896,6 +933,7 @@ static int handler(request_rec *r)
         return HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    apr_table_set(r->headers_out, "ETag", ETag);
     return send_image(r, dst, cfg->mime_type);
 }
 
@@ -934,7 +972,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     line = apr_table_get(kvp, "ETagSeed");
     // Ignore the flag
     int flag;
-    c->seed = line ? base32decode((unsigned char *)line, &flag) : 0;
+    c->seed = line ? base32decode(line, &flag) : 0;
     // Set the missing tile etag, with the extra bit set
     uint64tobase32(c->seed, c->eETag, 1);
 
@@ -969,7 +1007,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (line)
         c->quality = strtod(line, NULL);
 
-    // Set the actuall reprojection function
+    // Set the reprojection code
     if (IS_AFFINE_SCALING(c))
         c->code = P_AFFINE;
     else if (IS_GCS2WM(c))
