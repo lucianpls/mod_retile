@@ -347,14 +347,15 @@ static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern
 // Is the projection GCS
 static bool is_gcs(const char *projection) {
     return !apr_strnatcasecmp(projection, "GCS")
+        || !apr_strnatcasecmp(projection, "WGS84")
         || !apr_strnatcasecmp(projection, "EPSG:4326");
 }
 
 // Is the projection spherical mercator, include the Pseudo Mercator code
 static bool is_wm(const char *projection) {
     return !apr_strnatcasecmp(projection, "WM")
-        || !apr_strnatcasecmp(projection, "EPSG:3857")
-        || !apr_strnatcasecmp(projection, "EPSG:3785");
+        || !apr_strnatcasecmp(projection, "EPSG:3857")  // The current code
+        || !apr_strnatcasecmp(projection, "EPSG:3785"); // Wrong code
 }
 
 // If projection is the same, the transformation is an affine scaling
@@ -525,7 +526,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             return rr_status; // Pass status along
         }
 
-        const char *ETagIn = apr_table_get(r->headers_out, "ETag");
+        const char *ETagIn = apr_table_get(rr->headers_out, "ETag");
         apr_uint64_t etag;
         int empty_flag = 0;
         if (nullptr != ETagIn) {
@@ -571,7 +572,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     }
 
     ap_remove_output_filter(rf);
-    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
+//    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
 
     return APR_SUCCESS;
 }
@@ -855,7 +856,13 @@ static int handler(request_rec *r)
     oebb.xmax = cxf[cfg->code](cfg->eres, info.out_bbox.xmax);
     oebb.ymin = cyf[cfg->code](cfg->eres, info.out_bbox.ymin);
     oebb.ymax = cyf[cfg->code](cfg->eres, info.out_bbox.ymax);
-    double out_equiv_rx = (oebb.xmax - oebb.xmin)/ cfg->raster.pagesize.x;
+    double out_equiv_rx = (oebb.xmax - oebb.xmin) / cfg->raster.pagesize.x;
+    double out_equiv_ry = (oebb.ymax - oebb.ymin) / cfg->raster.pagesize.y;
+
+    // WM and GCS distortion is under 12:1, this eliminates the case where
+    // WM has no input tiles
+    if (out_equiv_ry < out_equiv_rx / 12) 
+        return send_empty_tile(r);
 
     // Pick the input level
     int input_l = input_level(cfg->inraster, out_equiv_rx, cfg->oversample);
