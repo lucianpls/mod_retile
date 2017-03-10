@@ -465,7 +465,7 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 // aligned as a single raster
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
 
-static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
+static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer, png_colorp &palette, png_bytep &trans)
 {
     const  sz &tl = info.tl, &br = info.br;
     repro_conf *cfg = info.c;
@@ -549,7 +549,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag one byte left
         etag_out ^= etag; // And combine it with the incoming tile etag
 
-	storage_manager src = { rctx.buffer, rctx.size };
+        storage_manager src = { rctx.buffer, rctx.size };
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
 
@@ -559,7 +559,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
             break;
         case PNG_SIG:
-            error_message = png_stride_decode(params, cfg->inraster, src, b);
+        	error_message = png_stride_decode(r->pool, params, cfg->inraster, src, b, palette, trans);
             break;
         default:
             error_message = "Unsupported format received";
@@ -816,6 +816,11 @@ static int handler(request_rec *r)
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
+    png_colorp png_palette;
+    png_bytep png_trans;
+    png_palette = (png_colorp)apr_pcalloc(r->pool, 256 * sizeof(png_color));
+    png_trans = (png_bytep)apr_pcalloc(r->pool, 256 * sizeof(unsigned char));
+
     work info;
     info.c = cfg;
     info.seed = cfg->seed;
@@ -877,7 +882,7 @@ static int handler(request_rec *r)
 
     // Incoming tiles buffer
     void *buffer = NULL;
-    apr_status_t status = retrieve_source(r, info, &buffer);
+    apr_status_t status = retrieve_source(r, info, &buffer, png_palette, png_trans);
     if (APR_SUCCESS != status) return status;
     // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
@@ -931,7 +936,15 @@ static int handler(request_rec *r)
         set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
-        error_message = png_encode(params, cfg->raster, raw, dst);
+        if (png_trans != NULL)
+         	params.has_transparency = TRUE;
+        if (png_palette != NULL) {
+			params.color_type = PNG_COLOR_TYPE_PALETTE;
+			params.bit_depth = 8;
+        }
+        error_message = png_encode(params, cfg->raster, raw, dst, png_palette, png_trans);
+        png_palette = 0;
+		png_trans = 0;
     }
 
     if (error_message) {
