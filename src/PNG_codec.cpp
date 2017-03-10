@@ -81,9 +81,11 @@ const char *png_stride_decode(apr_pool_t *p, codec_params &params, const TiledRa
 
         if (raster.pagesize.y != height || raster.pagesize.x != width)
             throw "Input PNG has the wrong size";
-//        if (png_get_rowbytes(pngp, infop) != params.line_stride) {
-//            throw "Wrong type of data in PNG encode";
-//        }
+        if (ct != PNG_COLOR_TYPE_PALETTE) {
+			if (png_get_rowbytes(pngp, infop) != params.line_stride) {
+				throw "Wrong type of data in PNG encode";
+			}
+        }
 
         png_read_image(pngp, png_rowp.data());
         png_read_end(pngp, infop);
@@ -133,11 +135,11 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
             PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
 
         png_set_compression_level(pngp, params.compression_level);
-        if (params.color_type = PNG_COLOR_TYPE_PALETTE) {
+        if (params.color_type == PNG_COLOR_TYPE_PALETTE) {
             png_set_PLTE(pngp, infop, palette, 256);
         }
         if (params.has_transparency) {
-        	if (params.color_type = PNG_COLOR_TYPE_PALETTE) {
+        	if (params.color_type == PNG_COLOR_TYPE_PALETTE) {
         		png_set_tRNS(pngp, infop, trans, 256, NULL);
         	} else {
                 // Flag NDV as transparent color
