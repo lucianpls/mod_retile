@@ -140,7 +140,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
         }
         if (params.has_transparency) {
         	if (params.color_type == PNG_COLOR_TYPE_PALETTE) {
-        		png_set_tRNS(pngp, infop, trans, 256, NULL);
+        		png_set_tRNS(pngp, infop, trans, 1, NULL);
         	} else {
                 // Flag NDV as transparent color
         		png_set_tRNS(pngp, infop, 0, 0, &params.NDV);
