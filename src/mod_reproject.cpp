@@ -465,7 +465,7 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 // aligned as a single raster
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
 
-static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer, png_colorp &palette, png_bytep &trans)
+static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer, int &ct, png_colorp &palette, png_bytep &trans)
 {
     const  sz &tl = info.tl, &br = info.br;
     repro_conf *cfg = info.c;
@@ -559,7 +559,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer, p
             error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
             break;
         case PNG_SIG:
-        	error_message = png_stride_decode(r->pool, params, cfg->inraster, src, b, palette, trans);
+        	error_message = png_stride_decode(r->pool, params, cfg->inraster, src, b, ct, palette, trans);
             break;
         default:
             error_message = "Unsupported format received";
@@ -821,6 +821,7 @@ static int handler(request_rec *r)
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
+    int ct;
     png_colorp png_palette;
     png_bytep png_trans;
     png_palette = (png_colorp)apr_pcalloc(r->pool, 256 * sizeof(png_color));
@@ -887,7 +888,7 @@ static int handler(request_rec *r)
 
     // Incoming tiles buffer
     void *buffer = NULL;
-    apr_status_t status = retrieve_source(r, info, &buffer, png_palette, png_trans);
+    apr_status_t status = retrieve_source(r, info, &buffer, ct, png_palette, png_trans);
     if (APR_SUCCESS != status) return status;
     // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
@@ -944,7 +945,7 @@ static int handler(request_rec *r)
         if (png_trans != NULL)
          	params.has_transparency = TRUE;
         if (png_palette != NULL) {
-			params.color_type = PNG_COLOR_TYPE_PALETTE;
+        	params.color_type = ct;
 			params.bit_depth = 8;
         }
         error_message = png_encode(params, cfg->raster, raw, dst, png_palette, png_trans);

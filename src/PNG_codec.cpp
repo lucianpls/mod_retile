@@ -46,7 +46,7 @@ static void store_data(png_structp pngp, png_bytep data, png_size_t length)
 }
 
 const char *png_stride_decode(apr_pool_t *p, codec_params &params, const TiledRaster &raster,
-    storage_manager &src, void *buffer, png_colorp &palette, png_bytep &trans)
+    storage_manager &src, void *buffer, int &ct, png_colorp &palette, png_bytep &trans)
 {
     char *message = NULL;
     png_structp pngp = (png_structp)apr_pcalloc(p, sizeof(png_structp));
@@ -58,7 +58,7 @@ const char *png_stride_decode(apr_pool_t *p, codec_params &params, const TiledRa
 
     try {
         png_uint_32 width, height;
-        int bit_depth, ct;
+        int bit_depth;
         pngp = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, pngEH, pngEH);
         infop = png_create_info_struct(pngp);
         png_set_read_fn(pngp, &src, get_data);
@@ -81,7 +81,7 @@ const char *png_stride_decode(apr_pool_t *p, codec_params &params, const TiledRa
 
         if (raster.pagesize.y != height || raster.pagesize.x != width)
             throw "Input PNG has the wrong size";
-        if (ct != PNG_COLOR_TYPE_PALETTE) {
+        if (ct == PNG_COLOR_TYPE_RGB) {
 			if (png_get_rowbytes(pngp, infop) != params.line_stride) {
 				throw "Wrong type of data in PNG encode";
 			}
@@ -140,7 +140,7 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
         }
         if (params.has_transparency) {
         	if (params.color_type == PNG_COLOR_TYPE_PALETTE) {
-        		png_set_tRNS(pngp, infop, trans, 256, NULL);
+        		png_set_tRNS(pngp, infop, trans, 1, NULL);
         	} else {
                 // Flag NDV as transparent color
         		png_set_tRNS(pngp, infop, 0, 0, &params.NDV);
