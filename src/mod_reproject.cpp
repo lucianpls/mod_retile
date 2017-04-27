@@ -408,20 +408,41 @@ static int send_empty_tile(request_rec *r) {
 }
 
 // Pick an input level based on desired output resolution
-static int input_level(const TiledRaster &raster, double res, int over) {
-    // The raster levels are in increasing resolution order, test until 
-    for (int choice = 0; choice < raster.n_levels; choice++) {
-        double cres = raster.rsets[choice].rx;
+static int input_level(const TiledRaster &raster, double rx, double ry, int over) {
+    // The raster levels are in increasing resolution order, test until you find one, both x and y
+    int choiceX, choiceY;
+
+    for (choiceX = 0; choiceX < raster.n_levels; choiceX++) {
+        double cres = raster.rsets[choiceX].rx;
         cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to avoid jitter noise
-        if (cres < res) { // This is the best choice, we will return
-            if (over) choice -= 1; // Use the lower resolution if oversampling
-            if (choice < raster.skip)
-                return raster.skip;
-            return choice;
+        if (cres < rx) { // This is the best choice, we will return
+            if (over) choiceX -= 1; // Use the higher resolution if oversampling
+            if (choiceX < raster.skip)
+                choiceX = raster.skip; // Stick to the defined levels
+            break; // Done with X
         }
     }
-    // Use the highest resolution level
-    return raster.n_levels -1;
+
+    // Return early if we're already at the bottom
+    if (choiceX >= raster.n_levels)
+        return raster.n_levels - 1;
+
+    for (choiceY = 0; choiceY < raster.n_levels; choiceY++) {
+        double cres = raster.rsets[choiceY].ry;
+        cres -= cres / raster.pagesize.y / 2; // Add half pixel worth to avoid jitter noise
+        if (cres < ry) { // This is the best choice, we will return
+            if (over) choiceY -= 1; // Use the higher resolution if oversampling
+            if (choiceY < raster.skip)
+                choiceY = raster.skip; // Stick to the defined levels
+            break;
+        }
+    }
+
+    if (choiceY >= raster.n_levels)
+        return raster.n_levels - 1;
+
+    // Pick the higher level number to insure best quality
+    return (choiceX > choiceY) ? choiceX : choiceY;
 }
 
 // From a tile location, generate a bounding box of a raster
@@ -437,9 +458,13 @@ static void tile_to_bbox(const TiledRaster &raster, const sz *tile, bbox_t &bb) 
     bb.ymin = bb.ymax - ry * raster.pagesize.y;
 }
 
+static int ntiles(const sz &tl, const sz &br) {
+    return int((br.x - tl.x) * (br.y - tl.y));
+}
+
 // From a bounding box, calculate the top-left and bottom-right tiles of a specific level of a raster
 // Input level is absolute, the one set in output tiles is relative
-static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz *tl_tile, sz *br_tile) {
+static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz &tl_tile, sz &br_tile) {
     double rx = raster.rsets[level].rx;
     double ry = raster.rsets[level].ry;
     double x = (bb.xmin - raster.bbox.xmin) / (rx * raster.pagesize.x);
@@ -447,18 +472,18 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 
     // Truncate is fine for these two, after adding quarter pixel to eliminate jitter
     // X and Y are in pages, so a pixel is 1/pagesize
-    tl_tile->x = int(x + 0.25 / raster.pagesize.x);
-    tl_tile->y = int(y + 0.25 / raster.pagesize.y);
+    tl_tile.x = int(x + 0.25 / raster.pagesize.x);
+    tl_tile.y = int(y + 0.25 / raster.pagesize.y);
 
     x = (bb.xmax - raster.bbox.xmin) / (rx * raster.pagesize.x);
     y = (raster.bbox.ymax - bb.ymin) / (ry * raster.pagesize.y);
 
     // Pad these quarter pixel to avoid jitter
-    br_tile->x = int(x + 0.25 / raster.pagesize.x);
-    br_tile->y = int(y + 0.25 / raster.pagesize.y);
+    br_tile.x = int(x + 0.25 / raster.pagesize.x);
+    br_tile.y = int(y + 0.25 / raster.pagesize.y);
     // Use a tile only if we get more than half pixel in
-    if (x - br_tile->x > 0.5 / raster.pagesize.x) br_tile->x++;
-    if (y - br_tile->y > 0.5 / raster.pagesize.y) br_tile->y++;
+    if (x - br_tile.x > 0.5 / raster.pagesize.x) br_tile.x++;
+    if (y - br_tile.y > 0.5 / raster.pagesize.y) br_tile.y++;
 }
 
 // Fetches and decodes all tiles between tl and br, writes output in buffer
@@ -472,9 +497,9 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer, i
     apr_uint64_t &etag_out = info.seed;
     const char *error_message;
 
-    int ntiles = int((br.x - tl.x) * (br.y - tl.y));
+    int nt = ntiles(tl, br);
     // Should have a reasonable number of input tiles, 64 is a good figure
-    SERR_IF(ntiles > 64, "Too many input tiles required, maximum is 64");
+    SERR_IF(nt > 64, "Too many input tiles required, maximum is 64");
 
     // Allocate a buffer for receiving responses
     receive_ctx rctx;
@@ -492,7 +517,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer, i
 
     params.line_stride = int((br.x - tl.x) * input_line_width);
 
-    apr_size_t bufsize = pagesize * ntiles;
+    apr_size_t bufsize = pagesize * nt;
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
@@ -875,9 +900,17 @@ static int handler(request_rec *r)
     if (out_equiv_ry < out_equiv_rx / 12) 
         return send_empty_tile(r);
 
-    // Pick the input level
-    int input_l = input_level(cfg->inraster, out_equiv_rx, cfg->oversample);
-    bbox_to_tile(cfg->inraster, input_l, oebb, &info.tl, &info.br);
+    // Pick the ideal input level
+    int input_l = input_level(cfg->inraster, out_equiv_rx, out_equiv_ry, cfg->oversample);
+
+    // Adjust the input level to keep the number of input requests small
+    // TODO: The 64 should be a configuration parameter, max input tiles per request
+    bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
+    //while (ntiles(info.tl, info.br) > 64 && input_l + 2 < cfg->inraster.n_levels) {
+    //    input_l++;
+    //    bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
+    //}
+
     info.tl.z = info.br.z = info.out_tile.z;
     info.tl.c = info.br.c = cfg->inraster.pagesize.c;
     info.tl.l = info.br.l = input_l;
