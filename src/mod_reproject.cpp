@@ -3,7 +3,7 @@
  * An AHTSE tile to tile conversion module, should do most of the functionality required by a WMS server
  * Uses a 3-4 paramter rest tile service as a data source
  *
- * (C) Lucian Plesea 2016
+ * (C) Lucian Plesea 2016-2017
  */
 
 // TODO: Test
@@ -895,10 +895,10 @@ static int handler(request_rec *r)
     // Adjust the input level to keep the number of input requests small
     // TODO: The 64 should be a configuration parameter, max input tiles per request
     bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
-    //while (ntiles(info.tl, info.br) > 64 && input_l + 2 < cfg->inraster.n_levels) {
-    //    input_l++;
-    //    bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
-    //}
+    while (ntiles(info.tl, info.br) > 64 && input_l + 2 < cfg->inraster.n_levels) {
+        input_l++;
+        bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
+    }
 
     info.tl.z = info.br.z = info.out_tile.z;
     info.tl.c = info.br.c = cfg->inraster.pagesize.c;
@@ -1008,6 +1008,15 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     // Sampling flags
     c->oversample = NULL != apr_table_get(kvp, "Oversample");
     c->nearNb = NULL != apr_table_get(kvp, "Nearest");
+
+    if (line) {
+        c->max_in_tiles = int(atoi(line));
+        // Make sure it looks reasonable
+        if (c->max_in_tiles > 64 || c->max_in_tiles < 2)
+    }
+    else {
+        c->max_in_tiles = 16;
+    }
 
     line = apr_table_get(kvp, "ETagSeed");
     // Ignore the flag

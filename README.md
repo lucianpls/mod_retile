@@ -70,6 +70,9 @@ The first file contains the source raster information, while the second the desi
 **Oversample**
   - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one
 
+**MaxInTiles**
+  - Limits the number of subrequests made for each output tiles.  Valid values are between 2 and 64, default is 16.  A larger number may improve output image quality, but will make some requests slower, for GCS to WM reprojection.
+
 **Nearest**
   - If on, use nearest neighbor resampling instead of bilinear interpolation
 
