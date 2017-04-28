@@ -1009,10 +1009,12 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     c->oversample = NULL != apr_table_get(kvp, "Oversample");
     c->nearNb = NULL != apr_table_get(kvp, "Nearest");
 
+    line = apr_table_get(kvp, "MaxTilesIn");
     if (line) {
         c->max_in_tiles = int(atoi(line));
         // Make sure it looks reasonable
         if (c->max_in_tiles > 64 || c->max_in_tiles < 2)
+            return "MaxTilesIn values should be between 2 and 64";
     }
     else {
         c->max_in_tiles = 16;
