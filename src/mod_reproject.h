@@ -160,7 +160,7 @@ struct  repro_conf {
 
     // Choose a lower res input instead of a higher one
     int oversample;
-    int max_in_tiles;
+    int max_extra_levels;
 
     // Use NearNb, not bilinear interpolation
     int nearNb;

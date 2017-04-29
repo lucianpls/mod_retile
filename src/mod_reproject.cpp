@@ -48,6 +48,7 @@ struct work {
     sz tl, br;
     // Numerical ETag
     apr_uint64_t seed;
+    int in_level;
 };
 
 // Given a data type name, returns a data type
@@ -408,10 +409,12 @@ static int send_empty_tile(request_rec *r) {
 }
 
 // Pick an input level based on desired output resolution
-static int input_level(const TiledRaster &raster, double rx, double ry, int over) {
-    // The raster levels are in increasing resolution order, test until you find one, both x and y
+static int input_level(work &info, double rx, double ry) {
+    // The raster levels are in increasing resolution order, test until the best match, both x and y
     int choiceX, choiceY;
+    int over = info.c->oversample;
 
+    const TiledRaster &raster = info.c->inraster;
     for (choiceX = 0; choiceX < raster.n_levels; choiceX++) {
         double cres = raster.rsets[choiceX].rx;
         cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to avoid jitter noise
@@ -419,13 +422,12 @@ static int input_level(const TiledRaster &raster, double rx, double ry, int over
             if (over) choiceX -= 1; // Use the higher resolution if oversampling
             if (choiceX < raster.skip)
                 choiceX = raster.skip; // Stick to the defined levels
-            break; // Done with X
+            break;
         }
     }
 
-    // Return early if we're already at the bottom
     if (choiceX >= raster.n_levels)
-        return raster.n_levels - 1;
+        choiceX = raster.n_levels - 1;
 
     for (choiceY = 0; choiceY < raster.n_levels; choiceY++) {
         double cres = raster.rsets[choiceY].ry;
@@ -439,10 +441,17 @@ static int input_level(const TiledRaster &raster, double rx, double ry, int over
     }
 
     if (choiceY >= raster.n_levels)
-        return raster.n_levels - 1;
+        choiceY = raster.n_levels - 1;
 
     // Pick the higher level number to insure best quality
-    return (choiceX > choiceY) ? choiceX : choiceY;
+    info.in_level = (choiceX > choiceY) ? choiceX : choiceY;
+    // Make choiceX the lower level, to see how far we are
+    if (choiceY < choiceX) choiceX = choiceY;
+    // Apply the difference, both are between skip and n_levels -1
+    if (info.in_level > choiceX + info.c->max_extra_levels)
+        info.in_level = choiceX + info.c->max_extra_levels;
+
+    return info.in_level;
 }
 
 // From a tile location, generate a bounding box of a raster
@@ -889,16 +898,9 @@ static int handler(request_rec *r)
     if (out_equiv_ry < out_equiv_rx / 12) 
         return send_empty_tile(r);
 
-    // Pick the ideal input level
-    int input_l = input_level(cfg->inraster, out_equiv_rx, out_equiv_ry, cfg->oversample);
-
-    // Adjust the input level to keep the number of input requests small
-    // TODO: The 64 should be a configuration parameter, max input tiles per request
+    // Pick the input level
+    int input_l = input_level(info, out_equiv_rx, out_equiv_ry);
     bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
-    while (ntiles(info.tl, info.br) > 64 && input_l + 2 < cfg->inraster.n_levels) {
-        input_l++;
-        bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
-    }
 
     info.tl.z = info.br.z = info.out_tile.z;
     info.tl.c = info.br.c = cfg->inraster.pagesize.c;
@@ -1009,16 +1011,8 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     c->oversample = NULL != apr_table_get(kvp, "Oversample");
     c->nearNb = NULL != apr_table_get(kvp, "Nearest");
 
-    line = apr_table_get(kvp, "MaxTilesIn");
-    if (line) {
-        c->max_in_tiles = int(atoi(line));
-        // Make sure it looks reasonable
-        if (c->max_in_tiles > 64 || c->max_in_tiles < 2)
-            return "MaxTilesIn values should be between 2 and 64";
-    }
-    else {
-        c->max_in_tiles = 16;
-    }
+    line = apr_table_get(kvp, "ExtraLevels");
+    c->max_extra_levels = (line) ? int(atoi(line)) : 0;
 
     line = apr_table_get(kvp, "ETagSeed");
     // Ignore the flag
