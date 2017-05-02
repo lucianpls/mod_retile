@@ -14,6 +14,14 @@ The libraries for all the above packages should be available in \Apache24\lib an
 
 # Usage
 
+When reprojecting from GCS to WM or backwards, the input level gets chosen based on the relative resolution of the output tile and the input levels.
+There are two such values, calculated on the two axis.  The lowest output resolution axis figure is chosen, it will fall between two input levels.
+By default, the slightly lower resolution input level is chosen, which will lead to the minimum number of input tiles, thus maximum performance.
+The ___Oversample___ parameter is on, it chooses the next higher resolution input level, which in general will improve the output image sharpness, while degrading the performance slightly.
+When doing GCS to WM reprojection, at high latitudes it might be necessary to use an even higher input resolution level.  This can be done by using the ___ExtraLevels___ parameter, which takes a numerical value higher than 0 (default).
+Use this with care, as it can decrease performance considerably, increasing latency, processing and memory usage per request.  The ___Oversample___ and ___ExtraLevels___ have slightly different purpose and they can be combined, for example having oversample off while allowing one or two extra levels.
+They do interact however, the extra level implicit in the ___Oversample___ is added to the ones provided by ___ExtraLevels___.
+
 Implements two apache configuration directives:
 **Reproject_RegExp string**
 Can be present more than once, one of the existing regular expressions has to match the request URL for the request to be considered
@@ -69,6 +77,9 @@ The first file contains the source raster information, while the second the desi
 
 **Oversample**
   - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one
+
+**ExtraLevels**
+  - By default, mod_reproject avoids oversampling, which can generate stretched pixels in one direction. Turning oversample on picks the next higher resolution level. This parameter lets it use more higer resolution levels.  It defaults to 0, the value is in addition to the one added by oversample (if on).
 
 **Nearest**
   - If on, use nearest neighbor resampling instead of bilinear interpolation
