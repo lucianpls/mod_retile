@@ -309,20 +309,20 @@ static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
         apr_finfo_t finfo;
         stat = apr_stat(&finfo, efname, APR_FINFO_CSIZE, cmd->temp_pool);
         if (APR_SUCCESS != stat)
-            return apr_psprintf(cmd->pool, "Can't stat %s %pm", efname, stat);
+            return apr_psprintf(cmd->pool, "Can't stat %s %pm", efname, &stat);
         c->empty.size = static_cast<int>(finfo.csize);
     }
     stat = apr_file_open(&efile, efname, READ_RIGHTS, 0, cmd->temp_pool);
     if (APR_SUCCESS != stat)
-        return apr_psprintf(cmd->pool, "Can't open empty file %s, %pm", efname, stat);
+        return apr_psprintf(cmd->pool, "Can't open empty file %s, %pm", efname, &stat);
     c->empty.buffer = static_cast<char *>(apr_palloc(cmd->pool, (apr_size_t)c->empty.size));
     stat = apr_file_seek(efile, APR_SET, &offset);
     if (APR_SUCCESS != stat)
-        return apr_psprintf(cmd->pool, "Can't seek empty tile %s: %pm", efname, stat);
+        return apr_psprintf(cmd->pool, "Can't seek empty tile %s: %pm", efname, &stat);
     apr_size_t size = (apr_size_t)c->empty.size;
     stat = apr_file_read(efile, c->empty.buffer, &size);
     if (APR_SUCCESS != stat)
-        return apr_psprintf(cmd->pool, "Can't read from %s: %pm", efname, stat);
+        return apr_psprintf(cmd->pool, "Can't read from %s: %pm", efname, &stat);
     apr_file_close(efile);
     return NULL;
 }
@@ -530,8 +530,6 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
-    int tile_count = 0;
-
     // Retrieve every required tile and decompress it in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
         char *sub_uri = apr_pstrcat(r->pool,
@@ -720,7 +718,7 @@ template<typename T = apr_byte_t> static void interpolateNN(
 
     // Precompute the horizontal pick table, the vertical is only used once
     std::vector<int> hpick(dst.size.x);
-    for (int i = 0; i < hpick.size(); i++)
+    for (int i = 0; i < static_cast<int>(hpick.size()); i++)
         hpick[i] = colors * (h[i].line - ((h[i].w < 128) ? 1 : 0));
 
     if (colors == 1) { // faster code due to fewer tests
