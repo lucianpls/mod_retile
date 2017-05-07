@@ -717,13 +717,13 @@ template<typename T = apr_byte_t> static void interpolateNN(
     const int colors = static_cast<int>(dst.size.c);
 
     // Precompute the horizontal pick table, the vertical is only used once
-    std::vector<int> hpick(dst.size.x);
+    std::vector<int> hpick(static_cast<unsigned int>(dst.size.x));
     for (int i = 0; i < static_cast<int>(hpick.size()); i++)
         hpick[i] = colors * (h[i].line - ((h[i].w < 128) ? 1 : 0));
 
-    if (colors == 1) { // faster code due to fewer tests
+    if (colors == 1) { // optimization, only two loops
         for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
-            int vidx = src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0));
+            int vidx = static_cast<int>(src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0)));
             for (auto const &hid : hpick)
                 *data++ = s[vidx + hid];
         }
@@ -731,7 +731,7 @@ template<typename T = apr_byte_t> static void interpolateNN(
     }
 
     for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
-        int vidx = colors * src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0));
+        int vidx = static_cast<int>(colors * src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0)));
         for (auto const &hid : hpick)
             for (int c = 0; c < colors; c++)
                 *data++ = s[vidx + hid + c];
@@ -742,27 +742,23 @@ template<typename T = apr_byte_t> static void interpolateNN(
 void resample(const repro_conf *cfg, const iline *h,
     const interpolation_buffer &src, interpolation_buffer &dst)
 {
+#define RESAMP(T) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T>(src, dst, h, v)
+
     const iline *v = h + dst.size.x;
     switch (cfg->raster.datatype) {
     case GDT_UInt16:
-        if (cfg->nearNb)
-            interpolateNN<apr_uint16_t>(src, dst, h, v);
-        else
-            interpolate<apr_uint16_t>(src, dst, h, v);
+        RESAMP(apr_uint16_t);
         break;
     case GDT_Int16:
-        if (cfg->nearNb)
-            interpolateNN<apr_int16_t>(src, dst, h, v);
-        else
-            interpolate<apr_int16_t>(src, dst, h, v);
+        RESAMP(apr_int16_t);
         break;
     default: // Byte
-        if (cfg->nearNb)
-            interpolateNN(src, dst, h, v);
-        else
-            interpolate(src, dst, h, v);
+        RESAMP(apr_byte_t);
     }
+
+#undef RESAMP
 }
+
 
 // first param is reverse of radius, second is input coordinate
 typedef double coord_conv_f(double, double);
@@ -799,14 +795,14 @@ static void prep_x(work &info, iline *table) {
     const double out_r = (bbox.xmax - bbox.xmin) / info.c->raster.pagesize.x;
     const double in_r = info.c->inraster.rsets[info.tl.l].rx;
     const double offset = bbox.xmin - info.in_bbox.xmin + 0.5 * (out_r - in_r);
-    init_ilines(in_r, out_r, offset, table, info.c->raster.pagesize.x);
+    init_ilines(in_r, out_r, offset, table, static_cast<int>(info.c->raster.pagesize.x));
 }
 
 // Initialize ilines for y
 // coord_f is the function converting from output coordinates to input
 static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
     const double eres = info.c->eres;
-    const int size = info.c->raster.pagesize.y;
+    const int size = static_cast<int>(info.c->raster.pagesize.y);
     const double out_r = (info.out_bbox.ymax - info.out_bbox.ymin) / size;
     const double in_r = info.c->inraster.rsets[info.tl.l].ry;
     double offset = info.in_bbox.ymax - 0.5 * in_r;
@@ -838,8 +834,8 @@ static int handler(request_rec *r)
     // Tables of reprojection code dependent functions, to dispatch on
     // Could be done with a switch, this is more compact and easier to extend
     // The order has to match the PCode definitions
-    static const coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm };
-    static const coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm };
+    static coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm };
+    static coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm };
 
     // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
@@ -923,9 +919,9 @@ static int handler(request_rec *r)
         return HTTP_NOT_MODIFIED;
 
     // Outgoing raw tile buffer
-    int pixel_size = cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype);
+    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype));
     storage_manager raw;
-    raw.size = cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size;
+    raw.size = static_cast<int>(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
     raw.buffer = static_cast<char *>(apr_palloc(r->pool, raw.size));
 
     // Set up the input and output 2D interpolation buffers
@@ -935,14 +931,14 @@ static int handler(request_rec *r)
     ib.size.y *= (info.br.y - info.tl.y);
     interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize };
 
-    iline *table = static_cast<iline *>(apr_palloc(r->pool, sizeof(iline)*(ob.size.x + ob.size.y)));
+    iline *table = static_cast<iline *>(apr_palloc(r->pool, static_cast<apr_size_t>(sizeof(iline)*(ob.size.x + ob.size.y))));
     iline *ytable = table + ob.size.x;
 
     // The x dimension scaling is always linear
     prep_x(info, table);
-    adjust_itable(table, ob.size.x, ib.size.x - 1);
+    adjust_itable(table, static_cast<int>(ob.size.x), static_cast<unsigned int>(ib.size.x - 1));
     prep_y(info, ytable, cyf[cfg->code]);
-    adjust_itable(ytable, ob.size.y, ib.size.y - 1);
+    adjust_itable(ytable, static_cast<int>(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
 
     // Perform the actual resampling
     resample(cfg, table, ib, ob);
