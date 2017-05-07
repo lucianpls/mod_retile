@@ -66,6 +66,7 @@ static boolean empty_output_buffer(j_compress_ptr cinfo) { return FALSE; }
 const char *jpeg_stride_decode(codec_params &params, const TiledRaster &raster, storage_manager &src, 
     void *buffer)
 {
+    const char *message = NULL;
     jpeg_decompress_struct cinfo;
     ErrorMgr err;
     struct jpeg_source_mgr s = { (JOCTET *)src.buffer, static_cast<size_t>(src.size) };
@@ -97,15 +98,17 @@ const char *jpeg_stride_decode(codec_params &params, const TiledRaster &raster, 
     }
     catch (char *error) { // Capture the error
         strcpy(params.error_message, error);
+        message = params.error_message;
     }
 
     jpeg_destroy_decompress(&cinfo);
-    return params.error_message; // Either null or the error message
+    return message; // Either null or error message
 }
 
 const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_manager &src, 
     storage_manager &dst)
 {
+    const char *message = NULL;
     struct jpeg_compress_struct cinfo;
     ErrorMgr err;
     jpeg_destination_mgr mgr;
@@ -142,9 +145,10 @@ const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_
     }
     catch (char *error_message) {
         strcpy(params.error_message, error_message);
+        message = params.error_message;
     }
 
     jpeg_destroy_compress(&cinfo);
     dst.size -= mgr.free_in_buffer;
-    return params.error_message;
+    return message;
 }
