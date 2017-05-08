@@ -26,5 +26,5 @@ install : $(TARGET)
 	sudo cp $(TARGET) $(MOD_PATH)
 
 clean   :
-	rm -rf .libs *.{o,lo,slo,la}
+	rm -rf .libs *.o *.lo *.slo *.la
 

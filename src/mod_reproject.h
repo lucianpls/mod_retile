@@ -173,8 +173,10 @@ struct  repro_conf {
 //
 
 struct codec_params {
-    char error_message[1024];
+    // Line size in bytes
     apr_uint32_t line_stride;
+    // A place for codec error message
+    char error_message[1024];
 };
 
 // In JPEG_codec.cpp

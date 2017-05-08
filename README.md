@@ -1,8 +1,5 @@
 # mod_reproject
 
-# WORK IN PROGRESS
-# LIMITED FUNCTIONALITY
-
 An apache module that converts a geospatial tile service from one projection and tiling grid to another
 
 # Building

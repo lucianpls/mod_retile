@@ -79,7 +79,8 @@ const char *png_stride_decode(apr_pool_t *p, codec_params &params, const TiledRa
         png_get_PLTE(pngp, infop, &palette, &num_palette);
         png_get_tRNS(pngp, infop, &trans, &num_trans, &trans_values);
 
-        if (raster.pagesize.y != height || raster.pagesize.x != width)
+        if (static_cast<png_uint_32>(raster.pagesize.y) != height 
+            || static_cast<png_uint_32>(raster.pagesize.x) != width)
             throw "Input PNG has the wrong size";
         if (ct == PNG_COLOR_TYPE_RGB) {
 			if (png_get_rowbytes(pngp, infop) != params.line_stride) {
