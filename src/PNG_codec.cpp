@@ -82,11 +82,9 @@ const char *png_stride_decode(apr_pool_t *p, codec_params &params, const TiledRa
         if (static_cast<png_uint_32>(raster.pagesize.y) != height 
             || static_cast<png_uint_32>(raster.pagesize.x) != width)
             throw "Input PNG has the wrong size";
-        if (ct == PNG_COLOR_TYPE_RGB) {
-			if (png_get_rowbytes(pngp, infop) != params.line_stride) {
-				throw "Wrong type of data in PNG encode";
-			}
-        }
+
+//        if (png_get_rowbytes(pngp, infop) != params.line_stride)
+//            throw "Wrong type of data in PNG encode";
 
         png_read_image(pngp, png_rowp.data());
         png_read_end(pngp, infop);
