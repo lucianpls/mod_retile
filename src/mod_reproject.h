@@ -136,8 +136,8 @@ struct  repro_conf {
     // local web path to redirect the source requests
     const char *source, *postfix;
 
-    // array of guard regexp, one of them has to match
-    apr_array_header_t *regexp;
+    // array of guard regex pointers, one of them has to match
+    apr_array_header_t *arr_rxp;
 
     // Output mime-type, default is JPEG
     const char *mime_type;
