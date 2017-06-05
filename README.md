@@ -18,10 +18,10 @@ They do interact however, the extra level implicit in the ___Oversample___ is ad
 
 Implements two apache configuration directives:
 
-## Reproject_RegExp string
+## Reproject_RegExp pattern
 Can be present more than once, one of the existing regular expressions has to match the request URL for the request to be considered
 
-## Reproject_ConfigurationFiles source_configuration_file configuration_file**
+## Reproject_ConfigurationFiles source_configuration_file configuration_file
 The first file contains the source raster information, while the second the desired configuration for the output 
 
 # Directives in both source and reproject configuration files
@@ -32,10 +32,10 @@ The first file contains the source raster information, while the second the desi
 ## PageSize X Y 1 C
   - Optional, the pagesize in pixels, in both files, defaults to 512x512
 
-## Projection String
-  - Optional, in both files
+## Projection prj
+  - Optional, WM and GCS are recognized.
 
-## DataType
+## DataType type
   - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive
 
 ## SkippedLevels N
@@ -46,40 +46,40 @@ The first file contains the source raster information, while the second the desi
 
 # Directives only in the reproject configuration file
 
-## SourcePath
+## SourcePath filepath
   - Mandatory, the location of the tile source, up to the numerical arguments, as a local web path suitable for a subrequest
 
-## SourcePostfix
+## SourcePostfix string
   - Optional, a literal string that gets appended to the source URL tile requests
 
-## EmptyTile
-  - Size Offset FileName
+## EmptyTile size offset filename
+  - Size is required, Offset defaults to zero and filename defaults to sourcepath
 
-## MimeType
+## MimeType mtype
   - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type
 
-## ETagSeed
+## ETagSeed value
   - A base32 64bit number, to be used as a seed for ETag generation
 
-## InputBufferSize
+## InputBufferSize size
   - Default is 1MB, should be larger than the maximum expected input tile size
 
-## OutputBufferSize
+## OutputBufferSize size
   - Default is 1MB, should be larger than the maximum expected output tile size
 
-## Quality
+## Quality Q
   - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6
 
-## Oversample
+## Oversample On
   - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one
 
-## ExtraLevels
+## ExtraLevels N
   - By default, mod_reproject avoids oversampling, which can generate stretched pixels in one direction. Turning oversample on picks the next higher resolution level. This parameter lets it use more higer resolution levels.  It defaults to 0, the value is in addition to the one added by oversample (if on).
 
-## Nearest
+## Nearest On
   - If on, use nearest neighbor resampling instead of bilinear interpolation
 
-## Radius
+## Radius value
   - The planet radius in meters.  Used in reprojection calculations. Defaults to earth major radius
 
 # Ways to use
