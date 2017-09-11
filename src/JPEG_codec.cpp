@@ -3,7 +3,7 @@
  * C++ Wrapper around libjpeg, providing encoding and decoding functions
  * uses C++ throw-catch instead of setjmp
  *
- * (C)Lucian Plesea 2016
+ * (C)Lucian Plesea 2016-2017
  */
 
 #include "mod_reproject.h"

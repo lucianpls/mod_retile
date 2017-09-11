@@ -120,13 +120,16 @@ static const char *get_xyzc_size(struct sz *size, const char *value) {
 // Converts a 64bit value into 13 trigesimal chars
 static void uint64tobase32(apr_uint64_t value, char *buffer, int flag = 0) {
     static char b32digits[] = "0123456789abcdefghijklmnopqrstuv";
-    // From the bottom up
-    buffer[13] = 0; // End of string marker
-    for (int i = 0; i < 12; i++, value >>= 5)
-        buffer[12 - i] = b32digits[value & 0x1f];
-    // First char holds the empty tile flag
-    if (flag) flag = 0x10; // Making sure it has the right value
-    buffer[0] = b32digits[flag | value];
+    // First char has the flag bit
+    if (flag) flag = 1; // Normalize value
+    buffer[0] = b32digits[((value & 0xf) << 1) | flag];
+    value >>= 4; // Encoded 4 bits
+    // Five bits at a time, 60 bytes
+    for (int i = 1; i < 13; i++) {
+        buffer[i] = b32digits[value & 0x1f];
+        value >>= 5;
+    }
+    buffer[13] = '\0';
 }
 
 // Return the value from a base 32 character
@@ -146,10 +149,16 @@ static int b32(char ic) {
 static apr_uint64_t base32decode(const char *is, int *flag) {
     apr_int64_t value = 0;
     const unsigned char *s = reinterpret_cast<const unsigned char *>(is);
-    while (*s == '"') s++; // Skip initial quotes
-    *flag = (b32(*s) >> 4 ) & 1; // Pick up the flag from bit 5
-    for (int v = b32(*s++) & 0xf; v >= 0; v = b32(*s++))
+    while (*s == static_cast<unsigned char>('"'))
+        s++; // Skip quotes
+    *flag = b32(*s) & 1; // Pick up the flag, least bit of top char
+    // Initial value ignores the flag
+    int digits = 0; // How many base32 digits we've seen
+    for (int v = (b32(*s++) >> 1); v >= 0; v = b32(*s++), digits++)
         value = (value << 5) + v;
+    // Trailing zeros are missing if digits < 13
+    if (digits < 13)
+        value <<= 5 * (13 - digits);
     return value;
 }
 
@@ -210,7 +219,7 @@ static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
     raster.rsets = (struct rset *)apr_pcalloc(p, sizeof(rset) * raster.n_levels);
 
     // Populate rsets from the bottom, the way tile protcols count levels
-    // These are MRF rsets, not all of them are visible
+    // These are MRF rsets, not all of them have to be exposed
     struct rset *r = raster.rsets + raster.n_levels - 1;
     for (int i = 0; i < raster.n_levels; i++) {
         *r-- = level;
@@ -300,7 +309,7 @@ static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
     // Might be an offset, or offset then file name
     if (last != line)
         apr_strtoff(&(offset), last, &last, 0);
-    
+
     while (*last && isblank(*last)) last++;
     const char *efname = last;
 
@@ -353,11 +362,16 @@ static bool is_wm(const char *projection) {
         || !apr_strnatcasecmp(projection, "EPSG:3785"); // Wrong code
 }
 
+static bool is_m(const char *projection) {
+    return !apr_strnatcasecmp(projection, "Mercator")
+        || !apr_strnatcasecmp(projection, "EPSG:3395");
+}
+
 // If projection is the same, the transformation is an affine scaling
 #define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
 #define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
 #define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
-
+#define IS_WM2M(cfg) (is_wm(cfg->inraster.projection) && is_m(cfg->raster.projection))
 
 //
 // Tokenize a string into an array
@@ -409,9 +423,9 @@ static int input_level(work &info, double rx, double ry) {
     int over = info.c->oversample;
 
     const TiledRaster &raster = info.c->inraster;
-    for (choiceX = 0; choiceX < (raster.n_levels -1); choiceX++) {
+    for (choiceX = 0; choiceX < (raster.n_levels - 1); choiceX++) {
         double cres = raster.rsets[choiceX].rx;
-        cres -= cres / raster.pagesize.x / 2; // Add half pixel worth to choose matching level
+        cres += cres / raster.pagesize.x / 2; // Add half pixel worth to choose matching level
         if (cres < rx) { // This is the better choice
             if (!over) choiceX -= 1; // Use the lower resolution level if not oversampling
             if (choiceX < raster.skip)
@@ -420,9 +434,9 @@ static int input_level(work &info, double rx, double ry) {
         }
     }
 
-    for (choiceY = 0; choiceY < (raster.n_levels -1); choiceY++) {
+    for (choiceY = 0; choiceY < (raster.n_levels - 1); choiceY++) {
         double cres = raster.rsets[choiceY].ry;
-        cres -= cres / raster.pagesize.y / 2; // Add half pixel worth to avoid jitter noise
+        cres += cres / raster.pagesize.y / 2; // Add half pixel worth to avoid jitter noise
         if (cres < ry) { // This is the best choice
             if (!over) choiceY -= 1; // Use the higher level if oversampling
             if (choiceY < raster.skip)
@@ -530,8 +544,8 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
 
         // Location of first byte of this input tile
-        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x) 
-                + input_line_width * (x - tl.x);
+        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x)
+            + input_line_width * (x - tl.x);
 
         // Set up user agent signature, prepend the info
         const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
@@ -570,7 +584,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag one byte left
         etag_out ^= etag; // And combine it with the incoming tile etag
 
-	storage_manager src = { rctx.buffer, rctx.size };
+        storage_manager src = { rctx.buffer, rctx.size };
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
 
@@ -593,7 +607,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     }
 
     ap_remove_output_filter(rf);
-//    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
+    //    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
 
     return APR_SUCCESS;
 }
@@ -603,7 +617,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 // w is weigth of next line *256, can be 0 but not 256.
 // line is the higher line to be interpolated, always positive
 struct iline {
-    unsigned int w:8, line:24;
+    unsigned int w : 8, line : 24;
 };
 
 // Offset should be Out - In, center of first pixels, real world coordinates
@@ -614,8 +628,10 @@ static void init_ilines(double delta_in, double delta_out, double offset, iline 
         double pos = (offset + i * delta_out) / delta_in;
         // The high line
         itable[i].line = static_cast<int>(ceil(pos));
-        // Weight of high line, under 256
-        itable[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+        if (ceil(pos) != floor(pos))
+            itable[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+        else // Perfect match with this line
+            itable[i].w = 255;
     }
 }
 
@@ -633,7 +649,7 @@ static void adjust_itable(iline *table, int n, unsigned int max_avail) {
     }
 }
 
-// An 2D buffer
+// A 2D buffer
 struct interpolation_buffer {
     void *buffer;       // Location of first value per line
     sz size;            // Describes the organization of the buffer
@@ -654,10 +670,10 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     const int slw = static_cast<int>(src.size.x * colors);
 
     // single band optimization
-    if (1 == colors) { 
+    if (1 == colors) {
         for (int y = 0; y < dst.size.y; y++) {
             const WT vw = v[y].w;
-            for (int x = 0; x < dst.size.x; x++) 
+            for (int x = 0; x < dst.size.x; x++)
             {
                 const WT hw = h[x].w;
                 const int idx = slw * v[y].line + h[x].line; // high left index
@@ -673,7 +689,7 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     }
 
     // More than one band
-    for (int y = 0; y < dst.size.y; y++) {    
+    for (int y = 0; y < dst.size.y; y++) {
         const WT vw = v[y].w;
         for (int x = 0; x < dst.size.x; x++)
         {
@@ -762,20 +778,67 @@ static double wm2lon(double eres, double x) {
     return 360 * eres * x;
 }
 
+static double lon2wm(double eres, double lon) {
+    return lon / eres / 360;
+}
+
+static double m2lon(double eres, double x) {
+    return wm2lon(eres, x);
+}
+
+static double lon2m(double eres, double lon) {
+    return lon2wm(eres, lon);
+}
+
 // Web mercator Y to latitude in degrees
 static double wm2lat(double eres, double y) {
     return 90 * (1 - 4 / pi * atan(exp(eres * pi * 2 * -y)));
 }
 
-static double lon2wm(double eres, double lon) {
-    return lon / eres / 360;
-}
-
 // Goes out of bounds close to the poles, valid latitude range is under 85.052
 static double lat2wm(double eres, double lat) {
-    if (abs(lat) < 85.052)
-        return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
-    return (lat > 85) ? (0.5 / eres) : (-0.5 / eres);
+    if (abs(lat) > 85.052)
+        return (lat > 0) ? (0.5 / eres) : (-0.5 / eres); // pi*R or -pi*R
+    return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
+}
+
+// Mercator, projection EPSG:3395, conversion to WebMercator and degrees
+// Earth
+const double E = 0.08181919084262149; // sqrt(f * ( 2 - f)), f = 1/298.257223563
+
+static double lat2m(double eres, double lat) {
+    // WGS84
+    // Real mercator reaches a bit further on earth due to flattening
+    if (abs(lat) > 85.052)
+        return (lat > 0) ? (0.5 / eres) : (-0.5 / eres); // pi*R or -pi*R
+    double s = sin(pi * lat / 180);
+    return log(tan((1 + s) / (1 - s) * pow((1 - E*s) / (1 + E*s), E))) / eres / 2 / pi;
+}
+
+// The iterative solution, slightly time-consuming
+static double m2lat(double eres, double y) {
+    // Normalize y
+    y *= eres * pi * 2;
+    // Starting value, in radians
+    double lat = pi / 2 - 2 * atan(exp(-y));
+    // Max 10 iterations, it takes about 6 or 7
+    for (int i = 0; i < 10; i++) {
+        double es = E * sin(lat);
+        double nlat = pi / 2 - 2 * atan(exp(-y)*pow((1 - es) / (1 + es), E / 2));
+        if (lat == nlat) // Max 
+            break; // Normal exit
+        lat = nlat;
+    }
+    return lat * 180 / pi;  // Return the value in degrees
+}
+
+// Web mercator to mercator and vice-versa are composite transformations
+static double m2wm(double eres, double y) {
+    return lat2wm(eres, m2lat(eres, y));
+}
+
+static double wm2m(double eres, double y) {
+    return lat2m(eres, wm2lat(eres, y));
 }
 
 // The x dimension is most of the time linear, convenience function
@@ -790,19 +853,21 @@ static void prep_x(work &info, iline *table) {
 // Initialize ilines for y
 // coord_f is the function converting from output coordinates to input
 static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
-    const double eres = info.c->eres;
     const int size = static_cast<int>(info.c->raster.pagesize.y);
     const double out_r = (info.out_bbox.ymax - info.out_bbox.ymin) / size;
     const double in_r = info.c->inraster.rsets[info.tl.l].ry;
     double offset = info.in_bbox.ymax - 0.5 * in_r;
     for (int i = 0; i < size; i++) {
         // Coordinate of output line in input projection
-        const double coord = coord_f(eres, info.out_bbox.ymax - out_r * (i + 0.5));
+        const double coord = coord_f(info.c->eres, info.out_bbox.ymax - out_r * (i + 0.5));
         // Same in pixels
         const double pos = (offset - coord) / in_r;
         // Pick the higher line
         table[i].line = static_cast<int>(ceil(pos));
-        table[i].w = static_cast<int>(floor(256 * (pos - floor(pos))));
+        if (ceil(pos) != floor(pos))
+            table[i].w = static_cast<int>(floor(256.0 * (pos - floor(pos))));
+        else // Perfect match with this line
+            table[i].w = 255;
     }
 }
 
@@ -815,6 +880,7 @@ static bool our_request(request_rec *r, repro_conf *cfg) {
         ap_regex_t *m = APR_ARRAY_IDX(cfg->arr_rxp, i, ap_regex_t *);
         if (!ap_regexec(m, url_to_match, 0, NULL, 0)) return true; // Found
     }
+
     return false;
 }
 
@@ -823,8 +889,8 @@ static int handler(request_rec *r)
     // Tables of reprojection code dependent functions, to dispatch on
     // Could be done with a switch, this is more compact and easier to extend
     // The order has to match the PCode definitions
-    static coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm };
-    static coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm };
+    static coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj };
+    static coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
 
     // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
     repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
@@ -878,7 +944,7 @@ static int handler(request_rec *r)
 
     // WM and GCS distortion is under 12:1, this eliminates the case where
     // WM has no input tiles
-    if (out_equiv_ry < out_equiv_rx / 12) 
+    if (out_equiv_ry < out_equiv_rx / 12)
         return send_empty_tile(r);
 
     // Pick the input level
@@ -1042,6 +1108,8 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
         c->code = P_GCS2WM;
     else if (IS_WM2GCS(c))
         c->code = P_WM2GCS;
+    else if (IS_WM2M(c))
+        c->code = P_WM2M;
     else
         return "Can't determine reprojection function";
 
@@ -1052,7 +1120,7 @@ static const command_rec cmds[] =
 {
     AP_INIT_TAKE2(
     "Reproject_ConfigurationFiles",
-    (cmd_func) read_config, // Callback
+    (cmd_func)read_config, // Callback
     0, // Self-pass argument
     ACCESS_CONF, // availability
     "Source and output configuration files"
@@ -1060,7 +1128,7 @@ static const command_rec cmds[] =
 
     AP_INIT_TAKE1(
     "Reproject_RegExp",
-    (cmd_func) set_regexp,
+    (cmd_func)set_regexp,
     0, // Self-pass argument
     ACCESS_CONF, // availability
     "Regular expression that the URL has to match.  At least one is required."),
