@@ -84,7 +84,7 @@ const int dt_size[GDT_TypeCount] = { -1, 1, 2, 2, 4, 4, 4, 8 };
 
 // reprojection codes
 typedef enum {
-    P_AFFINE = 0, P_GCS2WM, P_WM2GCS, P_COUNT
+    P_AFFINE = 0, P_GCS2WM, P_WM2GCS, P_WM2M, P_M2WM, P_COUNT
 } PCode;
 
 // Separate channels and level, just in case
@@ -136,8 +136,8 @@ struct  repro_conf {
     // local web path to redirect the source requests
     const char *source, *postfix;
 
-    // array of guard regexp, one of them has to match
-    apr_array_header_t *regexp;
+    // array of guard regex pointers, one of them has to match
+    apr_array_header_t *arr_rxp;
 
     // Output mime-type, default is JPEG
     const char *mime_type;
@@ -151,7 +151,8 @@ struct  repro_conf {
 
     // Meaning depends on format
     double quality;
-    double eres; // earth resolution: 1 / (2 * PI * R)
+    // Normalized earth resolution: 1 / (2 * PI * R)
+    double eres; 
 
     // What is the buffer size for retrieving tiles
     apr_size_t max_input_size;
