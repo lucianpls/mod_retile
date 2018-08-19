@@ -518,8 +518,6 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     rctx.maxsize = cfg->max_input_size;
     rctx.buffer = (char *)apr_palloc(r->pool, rctx.maxsize);
 
-    ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, r, r->connection);
-
     codec_params params;
     int pixel_size = DT_SIZE(cfg->inraster.datatype);
 
@@ -554,11 +552,15 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         apr_table_setn(rr->headers_in, "User-Agent", user_agent);
 
         rctx.size = 0; // Reset the receive size
+        ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, rr, rr->connection);
+
         int rr_status = ap_run_sub_req(rr);
+        ap_remove_output_filter(rf);
+        ap_destroy_sub_req(rr);
+
         if (rr_status != APR_SUCCESS) {
-            ap_remove_output_filter(rf);
             ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri);
-            return rr_status; // Pass status along
+            return rr_status; // Pass error status along
         }
 
         const char *ETagIn = apr_table_get(rr->headers_out, "ETag");
@@ -605,8 +607,6 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             return HTTP_NOT_FOUND;
         }
     }
-
-    ap_remove_output_filter(rf);
     //    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
 
     return APR_SUCCESS;
