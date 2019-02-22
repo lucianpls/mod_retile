@@ -18,9 +18,11 @@
 #include <png.h>
 
 #if defined(DEBUG)
-#define LOG(r, mrf, ...) {\
+#define LOG(r, msg, ...) {\
   ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, msg, ##__VA_ARGS__);\
 }
+#else
+#define LOG()
 #endif
 
 // signatures in big endian, to autodetect tile type

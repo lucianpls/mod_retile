@@ -538,6 +538,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x),
             cfg->postfix, NULL);
 
+        LOG(r, "Requesting %s", sub_uri);
         request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
 
         // Location of first byte of this input tile
@@ -602,12 +603,12 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         }
 
         if (error_message != NULL) { // Something went wrong
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s :%s", error_message, sub_uri);
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s encoding for :%s", error_message, r->uri);
             return HTTP_NOT_FOUND;
         }
     }
     //    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
-
+    //
     return APR_SUCCESS;
 }
 
