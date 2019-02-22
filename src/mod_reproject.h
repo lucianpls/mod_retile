@@ -17,6 +17,12 @@
 #include <apr_strings.h>
 #include <png.h>
 
+#if defined(DEBUG)
+#define LOG(r, mrf, ...) {\
+  ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, msg, ##__VA_ARGS__);\
+}
+#endif
+
 // signatures in big endian, to autodetect tile type
 #define PNG_SIG 0x89504e47
 #define JPEG_SIG 0xffd8ffe0
