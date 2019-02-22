@@ -1,6 +1,6 @@
 # mod_reproject
 
-An apache module that converts a geospatial tile service from one projection and tiling grid to another
+An apache module that converts an AHTSE tile service from one projection or tiling grid to another
 
 # Building
 
@@ -67,8 +67,8 @@ The first file contains the source raster information, while the second the desi
 ## OutputBufferSize size
   - Default is 1MB, should be larger than the maximum expected output tile size
 
-## Quality Q
-  - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6
+## Quality value
+  - A floating point value, controls the output format features, it is format dependent.  Default for JPEG is 75.  Default for PNG is 6
 
 ## Oversample On
   - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one
