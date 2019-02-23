@@ -15,7 +15,9 @@
 static void flush_png(png_structp) {};
 
 // Do nothing for warnings
-static void pngWH(png_struct *png, png_const_charp message) {};
+static void pngWH(png_struct *png, png_const_charp message) {
+//    throw message;
+};
 
 // Error function
 static void pngEH(png_struct *png, png_const_charp message)
@@ -39,7 +41,7 @@ static void store_data(png_structp pngp, png_bytep data, png_size_t length)
 {
     storage_manager *dst = static_cast<storage_manager *>(png_get_io_ptr(pngp));
     if (static_cast<png_size_t>(dst->size) < length)
-        throw static_cast<png_const_charp>("PNG encode buffer overflow");
+        throw "PNG encode buffer overflow";
     memcpy(dst->buffer, data, length);
     dst->buffer += length;
     dst->size -= length;

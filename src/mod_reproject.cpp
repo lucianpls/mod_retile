@@ -603,7 +603,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         }
 
         if (error_message != NULL) { // Something went wrong
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s encoding for :%s", error_message, r->uri);
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
             return HTTP_NOT_FOUND;
         }
     }
@@ -1019,7 +1019,7 @@ static int handler(request_rec *r)
     }
 
     if (error_message) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s from :%s", error_message, r->uri);
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s encoding :%s", error_message, r->uri);
         // Something went wrong if compression fails
         return HTTP_INTERNAL_SERVER_ERROR;
     }
