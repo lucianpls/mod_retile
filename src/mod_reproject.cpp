@@ -1015,7 +1015,7 @@ static int handler(request_rec *r)
         set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
-        error_message = png_encode(params, cfg->raster, raw, dst);
+        error_message = png_encode(&params, cfg->raster, raw, dst);
     }
 
     if (error_message) {

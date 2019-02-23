@@ -107,7 +107,7 @@ const char *png_stride_decode(codec_params &params, const TiledRaster &raster,
     return message;
 }
 
-const char *png_encode(png_params &params, const TiledRaster &raster, 
+const char *png_encode(png_params *params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst)
 {
     char *message = NULL;
@@ -126,18 +126,18 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
         infop = png_create_info_struct(pngp);
         png_set_write_fn(pngp, &mgr, store_data, flush_png);
 
-        png_set_IHDR(pngp, infop, width, height, params.bit_depth, params.color_type,
+        png_set_IHDR(pngp, infop, width, height, params->bit_depth, params->color_type,
             PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
 
-        png_set_compression_level(pngp, params.compression_level);
+        png_set_compression_level(pngp, params->compression_level);
         // Flag NDV as transparent color
-        if (params.has_transparency)
-            png_set_tRNS(pngp, infop, 0, 0, &params.NDV);
+        if (params->has_transparency)
+            png_set_tRNS(pngp, infop, 0, 0, &params->NDV);
 
         int rowbytes = png_get_rowbytes(pngp, infop);
         for (size_t i = 0; i < png_rowp.size(); i++) {
             png_rowp[i] = reinterpret_cast<png_bytep>(src.buffer + i*rowbytes);
-            if (params.bit_depth == 16) {
+            if (params->bit_depth == 16) {
                 unsigned short int*p = reinterpret_cast<unsigned short int *>(png_rowp[i]);
                 // Swap bytes to net order, in place
                 for (int j = 0; j < rowbytes / 2; j++, p++)
@@ -150,11 +150,11 @@ const char *png_encode(png_params &params, const TiledRaster &raster,
         png_write_end(pngp, infop);
     }
     catch (const char *error) {
-        message = params.error_message;
+        message = params->error_message;
         strcpy(message, error);
     }
     catch (...) { // Just in case
-        message = params.error_message;
+        message = params->error_message;
         strcpy(message, "Unknown PNG encode error");
     }
 

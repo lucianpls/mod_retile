@@ -22,7 +22,7 @@
   ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, msg, ##__VA_ARGS__);\
 }
 #else
-#define LOG()
+#define LOG(...)
 #endif
 
 // signatures in big endian, to autodetect tile type
@@ -222,7 +222,7 @@ struct png_params : codec_params {
 // Returns NULL if everything looks fine, or an error message
 const char *png_stride_decode(codec_params &params, const TiledRaster &raster, 
     storage_manager &src, void *buffer);
-const char *png_encode(png_params &params, const TiledRaster &raster, 
+const char *png_encode(png_params *params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst);
 // Based on the raster configuration, populates a png parameter structure
 int set_png_params(const TiledRaster &raster, png_params *params);
