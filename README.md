@@ -82,6 +82,9 @@ The first file contains the source raster information, while the second the desi
 ## Radius value
   - The planet radius in meters.  Used in reprojection calculations. Defaults to earth major radius
 
+## Transparent On
+  - If set, the 0 value pixels in the output will be set as transparent (PNG only)
+
 # Ways to use
 
 If the input and output size and alignment match, it can be used to change quality or the format

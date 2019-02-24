@@ -131,8 +131,13 @@ const char *png_encode(png_params *params, const TiledRaster &raster,
 
         png_set_compression_level(pngp, params->compression_level);
         // Flag NDV as transparent color
-        if (params->has_transparency)
-            png_set_tRNS(pngp, infop, 0, 0, &params->NDV);
+        if (params->has_transparency) {
+            // TODO: Pass the transparent value via params
+            // For now, 0 is the no data value, regardless of type of data
+            png_color_16 tcolor;
+            memset(&tcolor, 0, sizeof(tcolor));
+            png_set_tRNS(pngp, infop, 0, 0, &tcolor);
+        }
 
         int rowbytes = png_get_rowbytes(pngp, infop);
         for (size_t i = 0; i < png_rowp.size(); i++) {

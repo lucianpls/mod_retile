@@ -165,7 +165,7 @@ static apr_uint64_t base32decode(const char *is, int *flag) {
 static void *create_dir_config(apr_pool_t *p, char *path)
 {
     repro_conf *c = (repro_conf *)apr_pcalloc(p, sizeof(repro_conf));
-    c->doc_path = path;
+    // c->doc_path = path;
     return c;
 }
 
@@ -1015,6 +1015,8 @@ static int handler(request_rec *r)
         set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
+        if (cfg->has_transparency)
+            params.has_transparency = true;
         error_message = png_encode(&params, cfg->raster, raw, dst);
     }
 
@@ -1100,6 +1102,10 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     line = apr_table_get(kvp, "Quality");
     if (line)
         c->quality = strtod(line, NULL);
+
+    line = apr_table_get(kvp, "Transparency");
+    if (line && !strcasecmp(line, "On"))
+        c->has_transparency = TRUE;
 
     // Set the reprojection code
     if (IS_AFFINE_SCALING(c))

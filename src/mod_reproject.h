@@ -133,7 +133,7 @@ typedef struct {
 
 struct  repro_conf {
     // http_root path of this configuration
-    const char *doc_path;
+    // const char *doc_path;
 
     // The reprojection function to be used, also used as an enable flag
     PCode code;
@@ -173,6 +173,9 @@ struct  repro_conf {
 
     // Use NearNb, not bilinear interpolation
     int nearNb;
+
+    // Flag to turn on transparency for formats that do support it
+    int has_transparency;
 };
 
 //
@@ -211,7 +214,7 @@ struct png_params : codec_params {
     // If true, NDV is the transparent color
     int has_transparency;
     // If has_transparency, this is the transparent color definition
-    png_color_16 NDV;
+    // png_color_16 NDV;
 };
 
 // In PNG_codec.cpp
