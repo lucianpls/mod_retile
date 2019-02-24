@@ -95,8 +95,15 @@ const char *png_stride_decode(codec_params &params, const TiledRaster &raster,
         longjmp(png_jmpbuf(pngp), 1);
     }
 
-    if (png_get_rowbytes(pngp, infop) != params.line_stride) {
+    if ((raster.datatype == GDT_Byte && bit_depth != 8) ||
+        ((raster.datatype == GDT_UInt16 || raster.datatype == GDT_Short) && bit_depth != 16)) {
         strcpy(params.error_message, "Input PNG has the wrong type");
+        longjmp(png_jmpbuf(pngp), 1);
+    }
+
+    // If the row is larger than the stride, it might overflow the buffer
+    if (png_get_rowbytes(pngp, infop) > params.line_stride) {
+        strcpy(params.error_message, "PNG decode buffer too small");
         longjmp(png_jmpbuf(pngp), 1);
     }
 
