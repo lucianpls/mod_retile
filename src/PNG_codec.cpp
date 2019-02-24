@@ -96,7 +96,7 @@ const char *png_stride_decode(codec_params &params, const TiledRaster &raster,
     }
 
     if (png_get_rowbytes(pngp, infop) != params.line_stride) {
-        strcpy(params.error_message, "Input PNG has the wrong size");
+        strcpy(params.error_message, "Input PNG has the wrong type");
         longjmp(png_jmpbuf(pngp), 1);
     }
 
