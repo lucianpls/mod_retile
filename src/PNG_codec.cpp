@@ -54,7 +54,7 @@ static void store_data(png_structp pngp, png_bytep data, png_size_t length)
     dst->size -= length;
 }
 
-const char *png_stride_decode(codec_params &params, const TiledRaster &raster, 
+const char *repro_png_stride_decode(codec_params &params, const TiledRaster &raster, 
     storage_manager &src, void *buffer)
 {
     png_structp pngp = NULL;
@@ -124,7 +124,7 @@ const char *png_stride_decode(codec_params &params, const TiledRaster &raster,
     return NULL;
 }
 
-const char *png_encode(png_params *params, const TiledRaster &raster, 
+const char *repro_png_encode(png_params *params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst)
 {
     png_structp pngp = NULL;
@@ -182,7 +182,7 @@ const char *png_encode(png_params *params, const TiledRaster &raster,
     return NULL;
 }
 
-int set_png_params(const TiledRaster &raster, png_params *params) {
+int repro_set_png_params(const TiledRaster &raster, png_params *params) {
     // Pick some defaults
     params->bit_depth = 8;
     params->compression_level = 6;

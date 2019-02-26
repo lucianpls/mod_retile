@@ -593,10 +593,10 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         switch (hton32(sig))
         {
         case JPEG_SIG:
-            error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
+            error_message = repro_jpeg_stride_decode(params, cfg->inraster, src, b);
             break;
         case PNG_SIG:
-            error_message = png_stride_decode(params, cfg->inraster, src, b);
+            error_message = repro_png_stride_decode(params, cfg->inraster, src, b);
             break;
         default:
             error_message = "Unsupported format received";
@@ -1008,16 +1008,16 @@ static int handler(request_rec *r)
     if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
         jpeg_params params;
         params.quality = static_cast<int>(cfg->quality);
-        error_message = jpeg_encode(params, cfg->raster, raw, dst);
+        error_message = repro_jpeg_encode(params, cfg->raster, raw, dst);
     }
     else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
         png_params params;
-        set_png_params(cfg->raster, &params);
+        repro_set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
         if (cfg->has_transparency)
             params.has_transparency = true;
-        error_message = png_encode(&params, cfg->raster, raw, dst);
+        error_message = repro_png_encode(&params, cfg->raster, raw, dst);
     }
 
     if (error_message) {

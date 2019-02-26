@@ -201,9 +201,9 @@ struct jpeg_params : codec_params {
     int quality;
 };
 
-const char *jpeg_stride_decode(codec_params &params, const TiledRaster &raster, storage_manager &src,
+const char *repro_jpeg_stride_decode(codec_params &params, const TiledRaster &raster, storage_manager &src,
     void *buffer);
-const char *jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_manager &src,
+const char *repro_jpeg_encode(jpeg_params &params, const TiledRaster &raster, storage_manager &src,
     storage_manager &dst);
 
 struct png_params : codec_params {
@@ -223,11 +223,11 @@ struct png_params : codec_params {
 // buffer is the location of the first byte on the first line of decoded data
 // line_stride is the size of a line in buffer (larger or equal to decoded PNG line)
 // Returns NULL if everything looks fine, or an error message
-const char *png_stride_decode(codec_params &params, const TiledRaster &raster, 
+const char *repro_png_stride_decode(codec_params &params, const TiledRaster &raster, 
     storage_manager &src, void *buffer);
-const char *png_encode(png_params *params, const TiledRaster &raster, 
+const char *repro_png_encode(png_params *params, const TiledRaster &raster, 
     storage_manager &src, storage_manager &dst);
 // Based on the raster configuration, populates a png parameter structure
-int set_png_params(const TiledRaster &raster, png_params *params);
+int repro_set_png_params(const TiledRaster &raster, png_params *params);
 
 #endif
