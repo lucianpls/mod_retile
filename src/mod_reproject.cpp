@@ -899,6 +899,7 @@ static int handler(request_rec *r)
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
+    // Paranoid check
     SERR_IF(!cfg->source, "Reproject_SourcePath not set");
 
     work info;

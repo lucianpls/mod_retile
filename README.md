@@ -24,6 +24,15 @@ Can be present more than once, one of the existing regular expressions has to ma
 ## Reproject_ConfigurationFiles source_configuration_file configuration_file
 The first file contains the source raster information, while the second the desired configuration for the output 
 
+## Reproject_Source string
+Required, the source path, up to the numerical arguments, as a local web path suitable for a subrequest
+
+## Reproject_Postfix string
+Optional, gets appended to the source URL tile requests, after the tile address
+
+## Reproject On
+Optional, should be the last reproject directive.  When set it checks the configuration for sanity
+
 # Directives in both source and reproject configuration files
 
 ## Size X Y Z C
@@ -45,12 +54,6 @@ The first file contains the source raster information, while the second the desi
   - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated
 
 # Directives only in the reproject configuration file
-
-## SourcePath filepath
-  - Mandatory, the location of the tile source, up to the numerical arguments, as a local web path suitable for a subrequest
-
-## SourcePostfix string
-  - Optional, a literal string that gets appended to the source URL tile requests
 
 ## EmptyTile size offset filename
   - Size is required, Offset defaults to zero and filename defaults to sourcepath
@@ -86,5 +89,4 @@ The first file contains the source raster information, while the second the desi
   - If set, the 0 value pixels in the output will be set as transparent (PNG only)
 
 # Ways to use
-
 If the input and output size and alignment match, it can be used to change quality or the format
