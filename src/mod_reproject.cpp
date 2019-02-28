@@ -56,7 +56,7 @@ static GDALDataType GetDT(const char *name) {
     if (name == NULL) return GDT_Byte;
     if (!apr_strnatcasecmp(name, "UINT16"))
         return GDT_UInt16;
-    else if (!apr_strnatcasecmp(name, "INT16") || !apr_strnatcasecmp(name, "INT"))
+    else if (!apr_strnatcasecmp(name, "INT16") || !apr_strnatcasecmp(name, "SHORT"))
         return GDT_Int16;
     else if (!apr_strnatcasecmp(name, "UINT32"))
         return GDT_UInt32;
@@ -899,6 +899,8 @@ static int handler(request_rec *r)
     apr_array_header_t *tokens = tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
+    SERR_IF(!cfg->source, "Reproject_SourcePath not set");
+
     work info;
     info.c = cfg;
     info.seed = cfg->seed;
@@ -1040,13 +1042,13 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (NULL == kvp) return err_message;
 
     err_message = const_cast<char*>(ConfigRaster(cmd->pool, kvp, c->inraster));
-    if (err_message) return apr_pstrcat(cmd->pool, "Source ", err_message, NULL);
+    if (err_message) return apr_pstrcat(cmd->pool, "Reading input configuration", err_message, NULL);
 
     // Then the real configuration file
     kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
     if (NULL == kvp) return err_message;
     err_message = const_cast<char *>(ConfigRaster(cmd->pool, kvp, c->raster));
-    if (err_message) return err_message;
+    if (err_message) return apr_pstrcat(cmd->pool, "Reading output configuration", err_message, NULL);
 
     // Output mime type
     line = apr_table_get(kvp, "MimeType");
@@ -1089,22 +1091,13 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (line)
         c->max_output_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
 
-    line = apr_table_get(kvp, "SourcePath");
-    if (!line)
-        return "SourcePath directive is missing";
-    c->source = apr_pstrdup(cmd->pool, line);
-
-    line = apr_table_get(kvp, "SourcePostfix");
-    if (line)
-        c->postfix = apr_pstrdup(cmd->pool, line);
-
     c->quality = 75.0; // Default for JPEG
     line = apr_table_get(kvp, "Quality");
     if (line)
         c->quality = strtod(line, NULL);
 
     line = apr_table_get(kvp, "Transparency");
-    if (line && !strcasecmp(line, "On"))
+    if (line && !apr_strnatcasecmp(line, "on"))
         c->has_transparency = TRUE;
 
     // Set the reprojection code
@@ -1122,6 +1115,21 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     return NULL;
 }
 
+// Directive: Reproject
+static const char *check_config(cmd_parms *cmd, repro_conf *c, const char *value)
+{
+    // Check the basic requirements
+    if (!c->source)
+        return "Reproject_SourcePath is required";
+
+    // Dump the configuration in a string and return it, debug help
+    if (!apr_strnatcasecmp(value, "verbose")) {
+        return "Unimplemented";
+    }
+
+    return NULL;
+}
+
 static const command_rec cmds[] =
 {
     AP_INIT_TAKE2(
@@ -1129,7 +1137,7 @@ static const command_rec cmds[] =
     (cmd_func)read_config, // Callback
     0, // Self-pass argument
     ACCESS_CONF, // availability
-    "Source and output configuration files"
+    "Required, source and output configuration files"
     ),
 
     AP_INIT_TAKE1(
@@ -1137,7 +1145,33 @@ static const command_rec cmds[] =
     (cmd_func)set_regexp,
     0, // Self-pass argument
     ACCESS_CONF, // availability
-    "Regular expression that the URL has to match.  At least one is required."),
+    "One or more, regular expression that the URL has to match"
+    ),
+
+    AP_INIT_TAKE1(
+    "Reproject_SourcePath",
+    (cmd_func)ap_set_string_slot,
+    (void *)APR_OFFSETOF(repro_conf, source),
+    ACCESS_CONF,
+    "Required, internal redirect path for the source"
+    ),
+
+    AP_INIT_TAKE1(
+    "Reproject_SourcePostfix",
+    (cmd_func)ap_set_string_slot,
+    (void *)APR_OFFSETOF(repro_conf, postfix),
+    ACCESS_CONF,
+    "Optional, internal redirect path ending, to be added after the M/L/R/C"
+    ),
+
+    AP_INIT_TAKE1(
+    "Reproject",
+    (cmd_func)check_config,
+    0,
+    ACCESS_CONF,
+    "On to check the configuration, it should be the last Reproject directive in a given location."
+    " Setting it to verbose will dump the configuration"
+    ),
 
     { NULL }
 };
