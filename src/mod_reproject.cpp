@@ -1120,7 +1120,7 @@ static const char *check_config(cmd_parms *cmd, repro_conf *c, const char *value
 {
     // Check the basic requirements
     if (!c->source)
-        return "Reproject_SourcePath is required";
+        return "Reproject_Source is required";
 
     // Dump the configuration in a string and return it, debug help
     if (!apr_strnatcasecmp(value, "verbose")) {
@@ -1149,7 +1149,7 @@ static const command_rec cmds[] =
     ),
 
     AP_INIT_TAKE1(
-    "Reproject_SourcePath",
+    "Reproject_Source",
     (cmd_func)ap_set_string_slot,
     (void *)APR_OFFSETOF(repro_conf, source),
     ACCESS_CONF,
