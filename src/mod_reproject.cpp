@@ -559,8 +559,10 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         ap_destroy_sub_req(rr);
 
         if (rr_status != APR_SUCCESS) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, rr_status, r, "Receive failed for %s", sub_uri);
-            return rr_status; // Pass error status along
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, rr_status, r, 
+                "Receive failed from %s", sub_uri);
+//            return rr_status; // Pass error status along
+            continue; // Ignore input errors, assume empty (zero)
         }
 
         const char *ETagIn = apr_table_get(rr->headers_out, "ETag");
