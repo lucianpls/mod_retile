@@ -530,6 +530,9 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
+    // Count of good tiles
+    int count = 0;
+
     // Retrieve every required tile and decompress it in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
         char *sub_uri = apr_pstrcat(r->pool,
@@ -555,14 +558,17 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, rr, rr->connection);
 
         int rr_status = ap_run_sub_req(rr);
+        int http_status = rr->status;
         ap_remove_output_filter(rf);
         ap_destroy_sub_req(rr);
 
-        if (rr_status != APR_SUCCESS) {
+        if (rr_status != APR_SUCCESS || http_status != HTTP_OK) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, rr_status, r, 
-                "Receive failed from %s", sub_uri);
+                "Subrequest %s failed, status %u", sub_uri, http_status);
 //            return rr_status; // Pass error status along
-            continue; // Ignore input errors, assume empty (zero)
+            if (http_status != HTTP_NOT_FOUND)
+                return http_status;
+            continue; // Ignore not found errors, assume empty (zero)
         }
 
         const char *ETagIn = apr_table_get(rr->headers_out, "ETag");
@@ -608,10 +614,13 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
             return HTTP_NOT_FOUND;
         }
+
+        if (http_status == HTTP_OK)
+            count++; // count the valid tiles
     }
     //    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
     //
-    return APR_SUCCESS;
+    return count ? APR_SUCCESS : HTTP_NOT_FOUND;
 }
 
 // Interpolation line, contains the above line and the relative weight (never zero)
