@@ -41,19 +41,25 @@ Optional, should be the last reproject directive.  When set it checks the config
 ## PageSize X Y 1 C
   - Optional, the pagesize in pixels, in both files, defaults to 512x512
 
-## Projection prj
-  - Optional, WM and GCS are recognized.
-
+## Projection string
+  - Optional, in which case the bounding box has to be correct
+  -- GCS, WGS84, EPSG:4326
+  -- WM, EPSG:3857, EPSG:3785
+  -- Mercator, EPSG:3395
+  
 ## DataType type
   - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive
-
+ 
 ## SkippedLevels N
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
 
 ## BoundingBox xmin,ymin,xmax,ymax
   - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated
+  
+## ETagSeed base32_value
+  - A base32 64bit number, to be used as a seed for ETag generation
 
-# Directives only in the reproject configuration file
+# Directives valid only in the reproject configuration file
 
 ## EmptyTile size offset filename
   - Size is required, Offset defaults to zero and filename defaults to sourcepath
@@ -61,14 +67,11 @@ Optional, should be the last reproject directive.  When set it checks the config
 ## MimeType mtype
   - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type
 
-## ETagSeed value
-  - A base32 64bit number, to be used as a seed for ETag generation
-
 ## InputBufferSize size
-  - Default is 1MB, should be larger than the maximum expected input tile size
+  - Buffer for one input tile, default is 1MB, should be larger than the maximum expected input tile size
 
 ## OutputBufferSize size
-  - Default is 1MB, should be larger than the maximum expected output tile size
+  - Buffer for out output tile, default is 1MB, should be larger than the maximum expected output tile size
 
 ## Quality value
   - A floating point value, controls the output format features, it is format dependent.  Default for JPEG is 75.  Default for PNG is 6
