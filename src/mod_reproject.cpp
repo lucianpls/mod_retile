@@ -6,8 +6,6 @@
  * (C) Lucian Plesea 2016-2017
  */
 
-// TODO: Test
-// TODO: Handle ETag conditional requests
 // TODO: Add LERC support
 // TODO: Allow overlap between tiles
 
@@ -91,6 +89,7 @@ static int send_image(request_rec *r, const storage_manager &src, const char *mi
 
     ap_set_content_length(r, src.size);
     ap_rwrite(src.buffer, src.size, r);
+    ap_rflush(r);
     return OK;
 }
 
@@ -902,12 +901,10 @@ static int handler(request_rec *r)
     // The order has to match the PCode definitions
     static coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj };
     static coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
-
-    // TODO: use r->header_only to verify ETags, assuming the subrequests are faster in that mode
     repro_conf *cfg = reinterpret_cast<repro_conf *>(
         ap_get_module_config(r->per_dir_config, &reproject_module));
-
     auto req_cfg = ap_get_module_config(r->request_config, &reproject_module);
+
     if (req_cfg)
         cfg = reinterpret_cast<repro_conf *>(req_cfg);
 
