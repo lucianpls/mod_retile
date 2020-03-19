@@ -565,10 +565,9 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             ETagIn = apr_pstrdup(r->pool, ETagIn);
         ap_destroy_sub_req(rr);
 
-        if (rr_status != HTTP_OK) {
+        if (rr_status != APR_SUCCESS) {
             ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
                 "Subrequest %s failed, status %u", sub_uri, rr_status);
-            //            return rr_status; // Pass error status along
             if (rr_status != HTTP_NOT_FOUND)
                 return rr_status;
             continue; // Ignore not found errors, assume empty (zero)
