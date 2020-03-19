@@ -556,21 +556,24 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         rctx.size = 0; // Reset the receive size
         ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, rr, rr->connection);
 
-        int rr_status = ap_run_sub_req(rr);
-        int http_status = rr->status;
+        int rr_status = ap_run_sub_req(rr); // This returns http status, aka 404, 200
+        //int http_status = rr->status; // This is usually 200, is it ever 404?
         ap_remove_output_filter(rf);
+        // Capture the tag before nuking the subrequest
+        const char* ETagIn = apr_table_get(rr->headers_out, "ETag");
+        if (ETagIn) 
+            ETagIn = apr_pstrdup(r->pool, ETagIn);
         ap_destroy_sub_req(rr);
 
-        if (rr_status != APR_SUCCESS || http_status != HTTP_OK) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, rr_status, r, 
-                "Subrequest %s failed, status %u", sub_uri, http_status);
-//            return rr_status; // Pass error status along
-            if (http_status != HTTP_NOT_FOUND)
-                return http_status;
+        if (rr_status != HTTP_OK) {
+            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
+                "Subrequest %s failed, status %u", sub_uri, rr_status);
+            //            return rr_status; // Pass error status along
+            if (rr_status != HTTP_NOT_FOUND)
+                return rr_status;
             continue; // Ignore not found errors, assume empty (zero)
         }
 
-        const char *ETagIn = apr_table_get(rr->headers_out, "ETag");
         apr_uint64_t etag;
         int empty_flag = 0;
         if (nullptr != ETagIn) {
@@ -590,7 +593,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             }
         }
         // Build up the outgoing ETag
-        etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag one byte left
+        etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
         etag_out ^= etag; // And combine it with the incoming tile etag
 
         storage_manager src = { rctx.buffer, rctx.size };
@@ -614,8 +617,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             return HTTP_NOT_FOUND;
         }
 
-        if (http_status == HTTP_OK)
-            count++; // count the valid tiles
+        count++; // count the valid tiles
     }
     //    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
     //
