@@ -54,7 +54,8 @@ Optional, should be the last reproject directive.  When set it checks the config
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
 
 ## BoundingBox xmin,ymin,xmax,ymax
-  - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated
+  - Optional, , defaults to the 0 to 1 interval, in both x and y.  These are mandatory when using this module for geo projection 
+  change, otherwise the defaults will apply. WMS style bounding box, floating point using decimal dot format, comma separated
   
 ## ETagSeed base32_value
   - A base32 64bit number, to be used as a seed for ETag generation
