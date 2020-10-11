@@ -19,12 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\JPEG_codec.cpp" />
     <ClCompile Include="src\mod_reproject.cpp" />
-    <ClCompile Include="src\PNG_codec.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="src\mod_reproject.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />
@@ -137,9 +132,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
       <AdditionalLibraryDirectories>\Apache24\lib;$(SolutionDir)$(Configuration);</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libhttpd.lib;libapr.lib;jpeg.lib;libpng.lib;zlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libahtse.lib;libhttpd.lib;libapr.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/EXPORT:reproject_module,@1</AdditionalOptions>
-      <IgnoreSpecificDefaultLibraries>libcmt;msvcrt;%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
     </Link>
     <PostBuildEvent>
       <Command>copy /y $(TargetPath) \Apache24\modules</Command>

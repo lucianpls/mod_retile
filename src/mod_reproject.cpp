@@ -9,11 +9,20 @@
 // TODO: Add LERC support
 // TODO: Allow overlap between tiles
 
-#include "mod_reproject.h"
-#include <cmath>
-#include <clocale>
+#include <ahtse.h>
+// From mod_receive
+#include <receive_context.h>
+
+#include <httpd.h>
+#include <http_config.h>
+#include <http_main.h>
+#include <http_protocol.h>
+#include <http_core.h>
+#include <http_request.h>
+#include <http_log.h>
+
+#include <apr_strings.h>
 #include <vector>
-#include <cctype>
 
 extern module AP_MODULE_DECLARE_DATA reproject_module;
 
@@ -21,15 +30,65 @@ extern module AP_MODULE_DECLARE_DATA reproject_module;
 APLOG_USE_MODULE(reproject);
 #endif
 
-// From mod_receive
-#include <receive_context.h>
-
+NS_AHTSE_USE
 using namespace std;
 
 // Rather than use the _USE_MATH_DEFINES, just calculate pi once, C++ style
 const static double pi = acos(-1.0);
 
 #define USER_AGENT "AHTSE Reproject"
+
+// reprojection codes
+typedef enum {
+    P_AFFINE = 0, P_GCS2WM, P_WM2GCS, P_WM2M, P_M2WM, P_COUNT
+} PCode;
+
+struct  repro_conf {
+    // http_root path of this configuration
+    // const char *doc_path;
+
+    // The reprojection function to be used, also used as an enable flag
+    PCode code;
+
+    // The output and input raster figures
+    TiledRaster raster, inraster;
+
+    // local web path to redirect the source requests
+    const char* source, * postfix;
+
+    // array of guard regex pointers, one of them has to match
+    apr_array_header_t* arr_rxp;
+
+    // Output mime-type, default is JPEG
+    const char* mime_type;
+    // ETag initializer
+    apr_uint64_t seed;
+    // Buffer for the emtpy tile etag
+    char eETag[16];
+
+    // Empty tile buffer, if provided
+    storage_manager empty;
+
+    // Meaning depends on format
+    double quality;
+    // Normalized earth resolution: 1 / (2 * PI * R)
+    double eres;
+
+    // What is the buffer size for retrieving tiles
+    apr_size_t max_input_size;
+    // What is the buffer size for outgoing tiles
+    apr_size_t max_output_size;
+
+    // Choose a lower res input instead of a higher one
+    int oversample;
+    int max_extra_levels;
+
+    // Use NearNb, not bilinear interpolation
+    int nearNb;
+
+    // Flag to turn on transparency for formats that do support it
+    int has_transparency;
+};
 
 // A structure for the coordinate information used in the current tile conversion
 struct work {
@@ -48,118 +107,6 @@ struct work {
     apr_uint64_t seed;
     int in_level;
 };
-
-// Given a data type name, returns a data type
-static GDALDataType GetDT(const char *name) {
-    if (name == NULL) return GDT_Byte;
-    if (!apr_strnatcasecmp(name, "UINT16"))
-        return GDT_UInt16;
-    else if (!apr_strnatcasecmp(name, "INT16") || !apr_strnatcasecmp(name, "SHORT"))
-        return GDT_Int16;
-    else if (!apr_strnatcasecmp(name, "UINT32"))
-        return GDT_UInt32;
-    else if (!apr_strnatcasecmp(name, "INT32") || !apr_strnatcasecmp(name, "INT"))
-        return GDT_Int32;
-    else if (!apr_strnatcasecmp(name, "FLOAT32") || !apr_strnatcasecmp(name, "FLOAT"))
-        return GDT_Float32;
-    else if (!apr_strnatcasecmp(name, "FLOAT64") || !apr_strnatcasecmp(name, "DOUBLE"))
-        return GDT_Float64;
-    else
-        return GDT_Byte;
-}
-
-static int send_image(request_rec *r, const storage_manager &src, const char *mime_type = NULL)
-{
-    if (mime_type)
-        ap_set_content_type(r, mime_type);
-    else
-        switch (hton32(*src.buffer)) {
-        case JPEG_SIG:
-            ap_set_content_type(r, "image/jpeg");
-            break;
-        case PNG_SIG:
-            ap_set_content_type(r, "image/png");
-            break;
-        default: // LERC goes here too
-            ap_set_content_type(r, "application/octet-stream");
-    }
-    // Is it gzipped content?
-    if (GZIP_SIG == hton32(*src.buffer))
-        apr_table_setn(r->headers_out, "Content-Encoding", "gzip");
-
-    ap_set_content_length(r, src.size);
-    ap_rwrite(src.buffer, src.size, r);
-    ap_rflush(r);
-    return OK;
-}
-
-// Returns NULL if it worked as expected, returns a four integer value from 
-// "x y", "x y z" or "x y z c"
-static const char *get_xyzc_size(struct sz *size, const char *value) {
-    char *s;
-    if (!value)
-        return " values missing";
-    size->x = apr_strtoi64(value, &s, 0);
-    size->y = apr_strtoi64(s, &s, 0);
-    size->c = 3;
-    size->z = 1;
-    if (errno == 0 && *s != 0) {
-        // Read optional third and fourth integers
-        size->z = apr_strtoi64(s, &s, 0);
-        if (*s != 0)
-            size->c = apr_strtoi64(s, &s, 0);
-    }
-    if (errno != 0 || *s != 0) {
-        // Raster size is 4 params max
-        return " incorrect format";
-    }
-    return NULL;
-}
-
-// Converts a 64bit value into 13 trigesimal chars
-static void uint64tobase32(apr_uint64_t value, char *buffer, int flag = 0) {
-    static char b32digits[] = "0123456789abcdefghijklmnopqrstuv";
-    // First char has the flag bit
-    if (flag) flag = 1; // Normalize value
-    buffer[0] = b32digits[((value & 0xf) << 1) | flag];
-    value >>= 4; // Encoded 4 bits
-    // Five bits at a time, 60 bytes
-    for (int i = 1; i < 13; i++) {
-        buffer[i] = b32digits[value & 0x1f];
-        value >>= 5;
-    }
-    buffer[13] = '\0';
-}
-
-// Return the value from a base 32 character
-// Returns a negative value if char is not a valid base32 char
-// ASCII only
-static int b32(char ic) {
-    int c = 0xff & (static_cast<int>(ic));
-    if (c < '0') return -1;
-    if (c - '0' < 10) return c - '0';
-    if (c < 'A') return -1;
-    if (c - 'A' < 22) return c - 'A' + 10;
-    if (c < 'a') return -1;
-    if (c - 'a' < 22) return c - 'a' + 10;
-    return -1;
-}
-
-static apr_uint64_t base32decode(const char *is, int *flag) {
-    apr_int64_t value = 0;
-    const unsigned char *s = reinterpret_cast<const unsigned char *>(is);
-    while (*s == static_cast<unsigned char>('"'))
-        s++; // Skip quotes
-    *flag = b32(*s) & 1; // Pick up the flag, least bit of top char
-    // Initial value ignores the flag
-    int digits = 0; // How many base32 digits we've seen
-    for (int v = (b32(*s++) >> 1); v >= 0; v = b32(*s++), digits++)
-        value = (value << 5) + v;
-    // Trailing zeros are missing if digits < 13
-    if (digits < 13)
-        value <<= 5 * (13 - digits);
-    return value;
-}
 
 static void *create_dir_config(apr_pool_t *p, char *path)
 {
@@ -199,101 +146,6 @@ static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, cha
     }
 
     return table;
-}
-
-static void init_rsets(apr_pool_t *p, struct TiledRaster &raster)
-{
-    // Clean up pagesize defaults
-    raster.pagesize.c = raster.size.c;
-    raster.pagesize.z = 1;
-
-    struct rset level;
-    level.width = int(1 + (raster.size.x - 1) / raster.pagesize.x);
-    level.height = int(1 + (raster.size.y - 1) / raster.pagesize.y);
-    level.rx = (raster.bbox.xmax - raster.bbox.xmin) / raster.size.x;
-    level.ry = (raster.bbox.ymax - raster.bbox.ymin) / raster.size.y;
-
-    // How many levels do we have
-    raster.n_levels = 2 + ilogb(max(level.height, level.width) - 1);
-    raster.rsets = (struct rset *)apr_pcalloc(p, sizeof(rset) * raster.n_levels);
-
-    // Populate rsets from the bottom, the way tile protcols count levels
-    // These are MRF rsets, not all of them have to be exposed
-    struct rset *r = raster.rsets + raster.n_levels - 1;
-    for (int i = 0; i < raster.n_levels; i++) {
-        *r-- = level;
-        // Prepare for the next level, assuming powers of two
-        level.width = 1 + (level.width - 1) / 2;
-        level.height = 1 + (level.height - 1) / 2;
-        level.rx *= 2;
-        level.ry *= 2;
-    }
-
-    // MRF has one tile at the top
-    ap_assert(raster.rsets[0].height == 1 && raster.rsets[0].width == 1);
-    ap_assert(raster.n_levels > raster.skip);
-}
-
-// Temporary switch locale to C, get four comma separated numbers in a bounding box, WMS style
-static const char *getbbox(const char *line, bbox_t *bbox)
-{
-    const char *lcl = setlocale(LC_NUMERIC, NULL);
-    const char *message = " format incorrect, expects four comma separated C locale numbers";
-    char *l;
-    setlocale(LC_NUMERIC, "C");
-
-    do {
-        bbox->xmin = strtod(line, &l); if (*l++ != ',') break;
-        bbox->ymin = strtod(l, &l);    if (*l++ != ',') break;
-        bbox->xmax = strtod(l, &l);    if (*l++ != ',') break;
-        bbox->ymax = strtod(l, &l);
-        message = NULL;
-    } while (false);
-
-    setlocale(LC_NUMERIC, lcl);
-    return message;
-}
-
-static const char *ConfigRaster(apr_pool_t *p, apr_table_t *kvp, struct TiledRaster &raster)
-{
-    const char *line;
-    line = apr_table_get(kvp, "Size");
-    if (!line)
-        return "Size directive is mandatory";
-    const char *err_message;
-    err_message = get_xyzc_size(&(raster.size), line);
-    if (err_message) return apr_pstrcat(p, "Size", err_message, NULL);
-    // Optional page size, defaults to 512x512
-    raster.pagesize.x = raster.pagesize.y = 512;
-    line = apr_table_get(kvp, "PageSize");
-    if (line) {
-        err_message = get_xyzc_size(&(raster.pagesize), line);
-        if (err_message) return apr_pstrcat(p, "PageSize", err_message, NULL);
-    }
-
-    // Optional data type, defaults to unsigned byte
-    raster.datatype = GetDT(apr_table_get(kvp, "DataType"));
-
-    line = apr_table_get(kvp, "SkippedLevels");
-    if (line)
-        raster.skip = int(apr_atoi64(line));
-
-    // Default projection is WM, meaning web mercator
-    line = apr_table_get(kvp, "Projection");
-    raster.projection = line ? apr_pstrdup(p, line) : "WM";
-
-    // Bounding box: minx, miny, maxx, maxy
-    raster.bbox.xmin = raster.bbox.ymin = 0.0;
-    raster.bbox.xmax = raster.bbox.ymax = 1.0;
-    line = apr_table_get(kvp, "BoundingBox");
-    if (line)
-        err_message = getbbox(line, &raster.bbox);
-    if (err_message)
-        return apr_pstrcat(p, "BoundingBox", err_message, NULL);
-
-    init_rsets(p, raster);
-
-    return NULL;
 }
 
 static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
@@ -371,21 +223,6 @@ static bool is_m(const char *projection) {
 #define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
 #define IS_WM2M(cfg) (is_wm(cfg->inraster.projection) && is_m(cfg->raster.projection))
 
-//
-// Tokenize a string into an array
-//  
-static apr_array_header_t* tokenize(apr_pool_t *p, const char *s, char sep = '/')
-{
-    apr_array_header_t* arr = apr_array_make(p, 10, sizeof(char *));
-    while (sep == *s) s++;
-    char *val;
-    while (*s && (val = ap_getword(p, &s, sep))) {
-        char **newelt = (char **)apr_array_push(arr);
-        *newelt = val;
-    }
-    return arr;
-}
-
 static int etag_matches(request_rec *r, const char *ETag) {
     const char *ETagIn = apr_table_get(r->headers_in, "If-None-Match");
     return ETagIn != 0 && strstr(ETagIn, ETag);
@@ -400,7 +237,7 @@ static int send_empty_tile(request_rec *r) {
     }
 
     if (!cfg->empty.buffer) return DECLINED;
-    return send_image(r, cfg->empty);
+    return sendImage(r, cfg->empty);
 }
 
 // Returns a bad request error if condition is met
@@ -513,11 +350,11 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 
     // Allocate a buffer for receiving responses
     receive_ctx rctx;
-    rctx.maxsize = cfg->max_input_size;
-    rctx.buffer = (char *)apr_palloc(r->pool, rctx.maxsize);
+    rctx.maxsize = static_cast<int>(cfg->max_input_size);
+    rctx.buffer = reinterpret_cast<char *>(apr_palloc(r->pool, rctx.maxsize));
 
     codec_params params;
-    int pixel_size = DT_SIZE(cfg->inraster.datatype);
+    int pixel_size = GDTGetSize(cfg->inraster.datatype);
 
     // inraster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);
@@ -525,7 +362,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 
     params.line_stride = int((br.x - tl.x) * input_line_width);
 
-    apr_size_t bufsize = pagesize * nt;
+    apr_size_t bufsize = static_cast<apr_size_t>(pagesize) * nt;
     if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
@@ -596,17 +433,19 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
         etag_out ^= etag; // And combine it with the incoming tile etag
 
-        storage_manager src = { rctx.buffer, rctx.size };
+        storage_manager src;
+        src.buffer = rctx.buffer;
+        src.size = rctx.size;
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
 
-        switch (hton32(sig))
+        switch (htobe32(sig))
         {
         case JPEG_SIG:
-            error_message = repro_jpeg_stride_decode(params, cfg->inraster, src, b);
+            error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
             break;
         case PNG_SIG:
-            error_message = repro_png_stride_decode(params, cfg->inraster, src, b);
+            error_message = png_stride_decode(params, cfg->inraster, src, b);
             break;
         default:
             error_message = "Unsupported format received";
@@ -913,7 +752,8 @@ static int handler(request_rec *r)
     if (!cfg || !our_request(r, cfg))
         return DECLINED;
 
-    apr_array_header_t *tokens = tokenize(r->pool, r->uri);
+    apr_array_header_t *tokens = 
+        tokenize(r->pool, r->uri);
     if (tokens->nelts < 3) return DECLINED; // At least Level Row Column
 
     // Paranoid check
@@ -946,8 +786,8 @@ static int handler(request_rec *r)
 
     // Outside of bounds tile returns a not-found error
     if (tile.l >= cfg->raster.n_levels ||
-        tile.x >= cfg->raster.rsets[tile.l].width ||
-        tile.y >= cfg->raster.rsets[tile.l].height)
+        tile.x >= cfg->raster.rsets[tile.l].w ||
+        tile.y >= cfg->raster.rsets[tile.l].h)
         return send_empty_tile(r);
 
     // Need to have mod_receive available
@@ -988,13 +828,13 @@ static int handler(request_rec *r)
 
     // Check the etag match before preparing output
     char ETag[16];
-    uint64tobase32(info.seed, ETag, info.seed == cfg->seed);
+    tobase32(info.seed, ETag, info.seed == cfg->seed ? 1 : 0);
     apr_table_set(r->headers_out, "ETag", ETag);
     if (etag_matches(r, ETag))
         return HTTP_NOT_MODIFIED;
 
     // Outgoing raw tile buffer
-    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * DT_SIZE(cfg->raster.datatype));
+    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * GDTGetSize(cfg->raster.datatype));
     storage_manager raw;
     raw.size = static_cast<int>(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
     raw.buffer = static_cast<char *>(apr_palloc(r->pool, raw.size));
@@ -1020,24 +860,23 @@ static int handler(request_rec *r)
 
     // A buffer for the output tile
     storage_manager dst;
-    dst.size = cfg->max_output_size;
-    dst.buffer = static_cast<char *>(apr_palloc(r->pool, dst.size));
-
+    dst.buffer = static_cast<char*>(apr_palloc(r->pool, dst.size));
+    dst.size = static_cast<int>(cfg->max_output_size);
     const char *error_message = "Unknown output format requested";
 
     if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
         jpeg_params params;
         params.quality = static_cast<int>(cfg->quality);
-        error_message = repro_jpeg_encode(params, cfg->raster, raw, dst);
+        error_message = jpeg_encode(params, cfg->raster, raw, dst);
     }
     else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
         png_params params;
-        repro_set_png_params(cfg->raster, &params);
+        set_def_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
         if (cfg->has_transparency)
             params.has_transparency = true;
-        error_message = repro_png_encode(&params, cfg->raster, raw, dst);
+        error_message = png_encode(params, cfg->raster, raw, dst);
     }
 
     if (error_message) {
@@ -1047,7 +886,7 @@ static int handler(request_rec *r)
     }
 
     apr_table_set(r->headers_out, "ETag", ETag);
-    return send_image(r, dst, cfg->mime_type);
+    return sendImage(r, dst, cfg->mime_type);
 }
 
 static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
@@ -1059,13 +898,13 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
     if (NULL == kvp) return err_message;
 
-    err_message = const_cast<char*>(ConfigRaster(cmd->pool, kvp, c->inraster));
+    err_message = const_cast<char*>(configRaster(cmd->pool, kvp, c->inraster));
     if (err_message) return apr_pstrcat(cmd->pool, "Reading input configuration", err_message, NULL);
 
     // Then the real configuration file
     kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
     if (NULL == kvp) return err_message;
-    err_message = const_cast<char *>(ConfigRaster(cmd->pool, kvp, c->raster));
+    err_message = const_cast<char *>(configRaster(cmd->pool, kvp, c->raster));
     if (err_message) return apr_pstrcat(cmd->pool, "Reading output configuration", err_message, NULL);
 
     // Output mime type
@@ -1090,7 +929,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     int flag;
     c->seed = line ? base32decode(line, &flag) : 0;
     // Set the missing tile etag, with the extra bit set
-    uint64tobase32(c->seed, c->eETag, 1);
+    tobase32(c->seed, c->eETag, 1);
 
     // EmptyTile, defaults to pass-through
     line = apr_table_get(kvp, "EmptyTile");
@@ -1100,12 +939,12 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     }
 
     line = apr_table_get(kvp, "InputBufferSize");
-    c->max_input_size = DEFAULT_INPUT_SIZE;
+    c->max_input_size = MAX_TILE_SIZE;
     if (line)
         c->max_input_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
 
     line = apr_table_get(kvp, "OutputBufferSize");
-    c->max_output_size = DEFAULT_INPUT_SIZE;
+    c->max_output_size = MAX_TILE_SIZE;
     if (line)
         c->max_output_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
 
