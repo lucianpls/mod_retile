@@ -1,12 +1,13 @@
 /*
  * mod_reproject.cpp
- * An AHTSE tile to tile conversion module, should do most of the functionality required by a WMS server
+ * An AHTSE tile to tile conversion module
  * Uses a 3-4 paramter rest tile service as a data source
  *
- * (C) Lucian Plesea 2016-2017
+ * (C) Lucian Plesea 2016-2020
  */
 
-// TODO: Add LERC support
+// TODO: Improve endianess support
+// TODO: Add LERC support, via libahtse
 // TODO: Allow overlap between tiles
 
 #include <ahtse.h>
@@ -33,20 +34,99 @@ APLOG_USE_MODULE(reproject);
 NS_AHTSE_USE
 using namespace std;
 
-// Rather than use the _USE_MATH_DEFINES, just calculate pi once, C++ style
+// C++ style, calculate pi once, instead of using the _USE_MATH_DEFINES 
 const static double pi = acos(-1.0);
 
-#define USER_AGENT "AHTSE Reproject"
+// first param is reverse of radius, second is input coordinate
+typedef double coord_conv_f(double, double);
+
+// Identical projection coordinate conversion
+static double same_proj(double, double c) {
+    return c;
+}
+
+// Web mercator X to longitude in degrees
+static double wm2lon(double eres, double x) {
+    return 360 * eres * x;
+}
+
+static double lon2wm(double eres, double lon) {
+    return lon / eres / 360;
+}
+
+static double m2lon(double eres, double x) {
+    return wm2lon(eres, x);
+}
+
+static double lon2m(double eres, double lon) {
+    return lon2wm(eres, lon);
+}
+
+// Web mercator Y to latitude in degrees
+static double wm2lat(double eres, double y) {
+    return 90 * (1 - 4 / pi * atan(exp(eres * pi * 2 * -y)));
+}
+
+// Goes out of bounds close to the poles, valid latitude range is under 85.052
+static double lat2wm(double eres, double lat) {
+    if (abs(lat) > 85.052)
+        return (lat > 0) ? (0.5 / eres) : (-0.5 / eres); // pi*R or -pi*R
+    return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
+}
+
+// Mercator, projection EPSG:3395, conversion to WebMercator and degrees
+// Earth
+const double E = 0.08181919084262149; // sqrt(f * ( 2 - f)), f = 1/298.257223563
+
+static double lat2m(double eres, double lat) {
+    // WGS84
+    // Real mercator reaches a bit further on earth due to flattening
+    if (abs(lat) > 85.052)
+        return (lat > 0) ? (0.5 / eres) : (-0.5 / eres); // pi*R or -pi*R
+    double s = sin(pi * lat / 180);
+    return log(tan((1 + s) / (1 - s) * pow((1 - E * s) / (1 + E * s), E))) / eres / 2 / pi;
+}
+
+// The iterative solution, slightly time-consuming
+static double m2lat(double eres, double y) {
+    // Normalize y
+    y *= eres * pi * 2;
+    // Starting value, in radians
+    double lat = pi / 2 - 2 * atan(exp(-y));
+    // Max 10 iterations, it takes about 6 or 7
+    for (int i = 0; i < 10; i++) {
+        double es = E * sin(lat);
+        double nlat = pi / 2 - 2 * atan(exp(-y) * pow((1 - es) / (1 + es), E / 2));
+        if (lat == nlat) // Max 
+            break; // Normal exit
+        lat = nlat;
+    }
+    return lat * 180 / pi;  // Return the value in degrees
+}
+
+// Web mercator to mercator and vice-versa are composite transformations
+static double m2wm(double eres, double y) {
+    return lat2wm(eres, m2lat(eres, y));
+}
+
+static double wm2m(double eres, double y) {
+    return lat2m(eres, wm2lat(eres, y));
+}
 
 // reprojection codes
 typedef enum {
     P_AFFINE = 0, P_GCS2WM, P_WM2GCS, P_WM2M, P_M2WM, P_COUNT
 } PCode;
 
-struct  repro_conf {
-    // http_root path of this configuration
-    // const char *doc_path;
+// Tables of reprojection code dependent functions, to dispatch on
+// Could be done with a switch, this is more compact and easier to extend
+// The order has to match the PCode definitions
+static coord_conv_f* cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj };
+static coord_conv_f* cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
 
+#define USER_AGENT "AHTSE Reproject"
+
+struct  repro_conf {
     // The reprojection function to be used, also used as an enable flag
     PCode code;
 
@@ -65,9 +145,6 @@ struct  repro_conf {
     apr_uint64_t seed;
     // Buffer for the emtpy tile etag
     char eETag[16];
-
-    // Empty tile buffer, if provided
-    storage_manager empty;
 
     // Meaning depends on format
     double quality;
@@ -108,94 +185,15 @@ struct work {
     int in_level;
 };
 
-static void *create_dir_config(apr_pool_t *p, char *path)
-{
-    repro_conf *c = (repro_conf *)apr_pcalloc(p, sizeof(repro_conf));
-    // c->doc_path = path;
+static void *create_dir_config(apr_pool_t *p, char *path) {
+    repro_conf *c = reinterpret_cast<repro_conf *>(apr_pcalloc(p, sizeof(repro_conf)));
     return c;
-}
-
-// Returns a table read from a file, or NULL and an error message
-static apr_table_t *read_pKVP_from_file(apr_pool_t *pool, const char *fname, char **err_message)
-
-{
-    *err_message = NULL;
-    ap_configfile_t *cfg_file;
-    apr_status_t s = ap_pcfg_openfile(&cfg_file, pool, fname);
-
-    if (APR_SUCCESS != s) { // %pm means print status error string
-        *err_message = apr_psprintf(pool, " %s - %pm", fname, &s);
-        return NULL;
-    }
-
-    char buffer[MAX_STRING_LEN];
-    apr_table_t *table = apr_table_make(pool, 8);
-    // This can return ENOSPC if lines are too long
-    while (APR_SUCCESS == (s = ap_cfg_getline(buffer, MAX_STRING_LEN, cfg_file))) {
-        if ((strlen(buffer) == 0) || buffer[0] == '#')
-            continue;
-        const char *value = buffer;
-        char *key = ap_getword_white(pool, &value);
-        apr_table_add(table, key, value);
-    }
-
-    ap_cfg_closefile(cfg_file);
-    if (s == APR_ENOSPC) {
-        *err_message = apr_psprintf(pool, "maximum line length of %d exceeded", MAX_STRING_LEN);
-        return NULL;
-    }
-
-    return table;
-}
-
-static char *read_empty_tile(cmd_parms *cmd, repro_conf *c, const char *line)
-{
-    // If we're provided a file name or a size, pre-read the empty tile in the 
-    apr_file_t *efile;
-    apr_off_t offset = 0;
-    apr_status_t stat;
-    char *last;
-
-    c->empty.size = static_cast<int>(apr_strtoi64(line, &last, 0));
-    // Might be an offset, or offset then file name
-    if (last != line)
-        apr_strtoff(&(offset), last, &last, 0);
-
-    while (*last && isblank(*last)) last++;
-    const char *efname = last;
-
-    // Use the temp pool for the file open, it will close it for us
-    if (!c->empty.size) { // Don't know the size, get it from the file
-        apr_finfo_t finfo;
-        stat = apr_stat(&finfo, efname, APR_FINFO_CSIZE, cmd->temp_pool);
-        if (APR_SUCCESS != stat)
-            return apr_psprintf(cmd->pool, "Can't stat %s %pm", efname, &stat);
-        c->empty.size = static_cast<int>(finfo.csize);
-    }
-    stat = apr_file_open(&efile, efname, READ_RIGHTS, 0, cmd->temp_pool);
-    if (APR_SUCCESS != stat)
-        return apr_psprintf(cmd->pool, "Can't open empty file %s, %pm", efname, &stat);
-    c->empty.buffer = static_cast<char *>(apr_palloc(cmd->pool, (apr_size_t)c->empty.size));
-    stat = apr_file_seek(efile, APR_SET, &offset);
-    if (APR_SUCCESS != stat)
-        return apr_psprintf(cmd->pool, "Can't seek empty tile %s: %pm", efname, &stat);
-    apr_size_t size = (apr_size_t)c->empty.size;
-    stat = apr_file_read(efile, c->empty.buffer, &size);
-    if (APR_SUCCESS != stat)
-        return apr_psprintf(cmd->pool, "Can't read from %s: %pm", efname, &stat);
-    apr_file_close(efile);
-    return NULL;
 }
 
 // Allow for one or more RegExp guard
 // One of them has to match if the request is to be considered
-static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern)
-{
-    if (c->arr_rxp == 0)
-        c->arr_rxp = apr_array_make(cmd->pool, 2, sizeof(ap_regex_t *));
-    ap_regex_t **m = (ap_regex_t **)apr_array_push(c->arr_rxp);
-    *m = ap_pregcomp(cmd->pool, pattern, 0);
-    return (NULL != *m) ? NULL : "Bad regular expression";
+static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern) {
+    return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
 }
 
 // Is the projection GCS
@@ -226,18 +224,6 @@ static bool is_m(const char *projection) {
 static int etag_matches(request_rec *r, const char *ETag) {
     const char *ETagIn = apr_table_get(r->headers_in, "If-None-Match");
     return ETagIn != 0 && strstr(ETagIn, ETag);
-}
-
-// Returns the empty tile if defined
-static int send_empty_tile(request_rec *r) {
-    repro_conf *cfg = (repro_conf *)ap_get_module_config(r->per_dir_config, &reproject_module);
-    if (etag_matches(r, cfg->eETag)) {
-        apr_table_setn(r->headers_out, "ETag", cfg->eETag);
-        return HTTP_NOT_MODIFIED;
-    }
-
-    if (!cfg->empty.buffer) return DECLINED;
-    return sendImage(r, cfg->empty);
 }
 
 // Returns a bad request error if condition is met
@@ -363,13 +349,13 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     params.line_stride = int((br.x - tl.x) * input_line_width);
 
     apr_size_t bufsize = static_cast<apr_size_t>(pagesize) * nt;
-    if (*buffer == NULL) // Allocate the buffer if not provided, filled with zeros
+    if (*buffer == nullptr) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
     // Count of good tiles
     int count = 0;
 
-    // Retrieve every required tile and decompress it in the right place
+    // Retrieve every required tile and decompress them in the right place
     for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
         char *sub_uri = apr_pstrcat(r->pool,
             (tl.z == 0) ?
@@ -386,7 +372,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 
         // Set up user agent signature, prepend the info
         const char *user_agent = apr_table_get(r->headers_in, "User-Agent");
-        user_agent = user_agent == NULL ? USER_AGENT :
+        user_agent = (user_agent == nullptr) ? USER_AGENT :
             apr_pstrcat(r->pool, USER_AGENT ", ", user_agent, NULL);
         apr_table_setn(rr->headers_in, "User-Agent", user_agent);
 
@@ -433,9 +419,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
         etag_out ^= etag; // And combine it with the incoming tile etag
 
-        storage_manager src;
-        src.buffer = rctx.buffer;
-        src.size = rctx.size;
+        storage_manager src(rctx.buffer, rctx.size);
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
 
@@ -451,7 +435,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             error_message = "Unsupported format received";
         }
 
-        if (error_message != NULL) { // Something went wrong
+        if (error_message) { // Something went wrong
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
             return HTTP_NOT_FOUND;
         }
@@ -616,81 +600,6 @@ void resample(const repro_conf *cfg, const iline *h,
 }
 
 
-// first param is reverse of radius, second is input coordinate
-typedef double coord_conv_f(double, double);
-
-// Identical projection coordinate conversion
-static double same_proj(double, double c) {
-    return c;
-}
-
-// Web mercator X to longitude in degrees
-static double wm2lon(double eres, double x) {
-    return 360 * eres * x;
-}
-
-static double lon2wm(double eres, double lon) {
-    return lon / eres / 360;
-}
-
-static double m2lon(double eres, double x) {
-    return wm2lon(eres, x);
-}
-
-static double lon2m(double eres, double lon) {
-    return lon2wm(eres, lon);
-}
-
-// Web mercator Y to latitude in degrees
-static double wm2lat(double eres, double y) {
-    return 90 * (1 - 4 / pi * atan(exp(eres * pi * 2 * -y)));
-}
-
-// Goes out of bounds close to the poles, valid latitude range is under 85.052
-static double lat2wm(double eres, double lat) {
-    if (abs(lat) > 85.052)
-        return (lat > 0) ? (0.5 / eres) : (-0.5 / eres); // pi*R or -pi*R
-    return log(tan(pi / 4 * (1 + lat / 90))) / eres / 2 / pi;
-}
-
-// Mercator, projection EPSG:3395, conversion to WebMercator and degrees
-// Earth
-const double E = 0.08181919084262149; // sqrt(f * ( 2 - f)), f = 1/298.257223563
-
-static double lat2m(double eres, double lat) {
-    // WGS84
-    // Real mercator reaches a bit further on earth due to flattening
-    if (abs(lat) > 85.052)
-        return (lat > 0) ? (0.5 / eres) : (-0.5 / eres); // pi*R or -pi*R
-    double s = sin(pi * lat / 180);
-    return log(tan((1 + s) / (1 - s) * pow((1 - E*s) / (1 + E*s), E))) / eres / 2 / pi;
-}
-
-// The iterative solution, slightly time-consuming
-static double m2lat(double eres, double y) {
-    // Normalize y
-    y *= eres * pi * 2;
-    // Starting value, in radians
-    double lat = pi / 2 - 2 * atan(exp(-y));
-    // Max 10 iterations, it takes about 6 or 7
-    for (int i = 0; i < 10; i++) {
-        double es = E * sin(lat);
-        double nlat = pi / 2 - 2 * atan(exp(-y)*pow((1 - es) / (1 + es), E / 2));
-        if (lat == nlat) // Max 
-            break; // Normal exit
-        lat = nlat;
-    }
-    return lat * 180 / pi;  // Return the value in degrees
-}
-
-// Web mercator to mercator and vice-versa are composite transformations
-static double m2wm(double eres, double y) {
-    return lat2wm(eres, m2lat(eres, y));
-}
-
-static double wm2m(double eres, double y) {
-    return lat2m(eres, wm2lat(eres, y));
-}
 
 // The x dimension is most of the time linear, convenience function
 static void prep_x(work &info, iline *table) {
@@ -737,11 +646,6 @@ static bool our_request(request_rec *r, repro_conf *cfg) {
 
 static int handler(request_rec *r)
 {
-    // Tables of reprojection code dependent functions, to dispatch on
-    // Could be done with a switch, this is more compact and easier to extend
-    // The order has to match the PCode definitions
-    static coord_conv_f *cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj };
-    static coord_conv_f *cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
     repro_conf *cfg = reinterpret_cast<repro_conf *>(
         ap_get_module_config(r->per_dir_config, &reproject_module));
     auto req_cfg = ap_get_module_config(r->request_config, &reproject_module);
@@ -779,7 +683,7 @@ static int handler(request_rec *r)
 
     // Don't allow access to negative values, send the empty tile instead
     if (tile.l < 0 || tile.x < 0 || tile.y < 0)
-        return send_empty_tile(r);
+        return sendEmptyTile(r, cfg->raster.missing);
 
     // Adjust the level to internal
     tile.l += cfg->raster.skip;
@@ -788,7 +692,7 @@ static int handler(request_rec *r)
     if (tile.l >= cfg->raster.n_levels ||
         tile.x >= cfg->raster.rsets[tile.l].w ||
         tile.y >= cfg->raster.rsets[tile.l].h)
-        return send_empty_tile(r);
+        return sendEmptyTile(r, cfg->raster.missing);
 
     // Need to have mod_receive available
     SERR_IF(!ap_get_output_filter_handle("Receive"), "mod_receive not installed");
@@ -805,7 +709,7 @@ static int handler(request_rec *r)
     // WM and GCS distortion is under 12:1, this eliminates the case where
     // WM has no input tiles
     if (out_equiv_ry < out_equiv_rx / 12)
-        return send_empty_tile(r);
+        return sendEmptyTile(r, cfg->raster.missing);
 
     // Pick the input level
     int input_l = input_level(info, out_equiv_rx, out_equiv_ry);
@@ -891,21 +795,22 @@ static int handler(request_rec *r)
 
 static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, const char *fname)
 {
-    char *err_message;
+    const char *err_message;
     const char *line;
 
     // Start with the source configuration
-    apr_table_t *kvp = read_pKVP_from_file(cmd->temp_pool, src, &err_message);
-    if (NULL == kvp) return err_message;
-
+    apr_table_t* kvp = readAHTSEConfig(cmd->temp_pool, src, &err_message);
+    if (nullptr == kvp)
+        return err_message;
     err_message = const_cast<char*>(configRaster(cmd->pool, kvp, c->inraster));
-    if (err_message) return apr_pstrcat(cmd->pool, "Reading input configuration", err_message, NULL);
+    if (err_message)
+        return err_message;
 
     // Then the real configuration file
-    kvp = read_pKVP_from_file(cmd->temp_pool, fname, &err_message);
+    kvp = readAHTSEConfig(cmd->temp_pool, fname, &err_message);
     if (NULL == kvp) return err_message;
     err_message = const_cast<char *>(configRaster(cmd->pool, kvp, c->raster));
-    if (err_message) return apr_pstrcat(cmd->pool, "Reading output configuration", err_message, NULL);
+    if (err_message) return err_message;
 
     // Output mime type
     line = apr_table_get(kvp, "MimeType");
@@ -934,28 +839,29 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     // EmptyTile, defaults to pass-through
     line = apr_table_get(kvp, "EmptyTile");
     if (line) {
-        err_message = read_empty_tile(cmd, c, line);
-        if (err_message) return err_message;
+        err_message = readFile(cmd->pool, c->raster.missing.data, line);
+        if (err_message)
+            return err_message;
     }
 
     line = apr_table_get(kvp, "InputBufferSize");
     c->max_input_size = MAX_TILE_SIZE;
     if (line)
-        c->max_input_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
+        c->max_input_size = static_cast<apr_size_t>(apr_strtoi64(line, nullptr, 0));
 
     line = apr_table_get(kvp, "OutputBufferSize");
     c->max_output_size = MAX_TILE_SIZE;
     if (line)
-        c->max_output_size = (apr_size_t)apr_strtoi64(line, NULL, 0);
+        c->max_output_size = static_cast<apr_size_t>(apr_strtoi64(line, nullptr, 0));
 
     c->quality = 75.0; // Default for JPEG
     line = apr_table_get(kvp, "Quality");
     if (line)
-        c->quality = strtod(line, NULL);
+        c->quality = strtod(line, nullptr);
 
     line = apr_table_get(kvp, "Transparency");
-    if (line && !apr_strnatcasecmp(line, "on"))
-        c->has_transparency = TRUE;
+    if (line)
+        c->has_transparency = getBool(line);
 
     // Set the reprojection code
     if (IS_AFFINE_SCALING(c))
@@ -969,22 +875,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     else
         return "Can't determine reprojection function";
 
-    return NULL;
-}
-
-// Directive: Reproject
-static const char *check_config(cmd_parms *cmd, repro_conf *c, const char *value)
-{
-    // Check the basic requirements
-    if (!c->source)
-        return "Reproject_Source is required";
-
-    // Dump the configuration in a string and return it, debug help
-    if (!apr_strnatcasecmp(value, "verbose")) {
-        return "Unimplemented";
-    }
-
-    return NULL;
+    return nullptr;
 }
 
 static const command_rec cmds[] =
@@ -1021,28 +912,19 @@ static const command_rec cmds[] =
     "Optional, internal redirect path ending, to be added after the M/L/R/C"
     ),
 
-    AP_INIT_TAKE1(
-    "Reproject",
-    (cmd_func)check_config,
-    0,
-    ACCESS_CONF,
-    "On to check the configuration, it should be the last Reproject directive in a given location."
-    " Setting it to verbose will dump the configuration"
-    ),
-
     { NULL }
 };
 
 static void register_hooks(apr_pool_t *p) {
-    ap_hook_handler(handler, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_handler(handler, nullptr, nullptr, APR_HOOK_MIDDLE);
 }
 
 module AP_MODULE_DECLARE_DATA reproject_module = {
     STANDARD20_MODULE_STUFF,
     create_dir_config,
-    0, // No dir_merge
-    0, // No server_config
-    0, // No server_merge
+    NULL, // No dir_merge
+    NULL, // No server_config
+    NULL, // No server_merge
     cmds, // configuration directives
     register_hooks // processing hooks
 };
