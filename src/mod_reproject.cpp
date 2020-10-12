@@ -379,8 +379,9 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         rctx.size = 0; // Reset the receive size
         ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, rr, rr->connection);
 
-        int rr_status = ap_run_sub_req(rr); // This returns http status, aka 404, 200
-        //int http_status = rr->status; // This is usually 200, is it ever 404?
+        // This returns http status, aka 404
+        // But returns 0 if code is 200
+        int rr_status = ap_run_sub_req(rr); // This returns http status, aka 404
         ap_remove_output_filter(rf);
         // Capture the tag before nuking the subrequest
 
@@ -423,7 +424,7 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
 
-        switch (htobe32(sig))
+        switch (sig)
         {
         case JPEG_SIG:
             error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
@@ -442,8 +443,6 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
 
         count++; // count the valid tiles
     }
-    //    apr_table_clear(r->headers_out); // Clean up the headers set by subrequests
-    //
     return count ? APR_SUCCESS : HTTP_NOT_FOUND;
 }
 
@@ -764,8 +763,8 @@ static int handler(request_rec *r)
 
     // A buffer for the output tile
     storage_manager dst;
-    dst.buffer = static_cast<char*>(apr_palloc(r->pool, dst.size));
     dst.size = static_cast<int>(cfg->max_output_size);
+    dst.buffer = static_cast<char*>(apr_palloc(r->pool, dst.size));
     const char *error_message = "Unknown output format requested";
 
     if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
