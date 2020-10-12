@@ -30,6 +30,9 @@ Required, the source path, up to the numerical arguments, as a local web path su
 ## Reproject_Postfix string
 Optional, gets appended to the source URL tile requests, after the tile address
 
+## Reproject_Indirect On
+Optional, if set the module only responds to indirect requests
+
 # Directives in both source and reproject configuration files
 
 ## Size X Y Z C
