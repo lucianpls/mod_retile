@@ -30,8 +30,8 @@ Required, the source path, up to the numerical arguments, as a local web path su
 ## Reproject_Postfix string
 Optional, gets appended to the source URL tile requests, after the tile address
 
-## Reproject On
-Optional, should be the last reproject directive.  When set it checks the configuration for sanity
+## Reproject_Indirect On
+Optional, if set the module only responds to indirect requests
 
 # Directives in both source and reproject configuration files
 
