@@ -1,12 +1,12 @@
 # mod_reproject [AHTSE](https://github.com/lucianpls/AHTSE)
 
-An apache module that converts an AHTSE tile service from one projection or tiling grid to another
+An apache module that converts an AHTSE tile service from one projection or tiling grid to another. 
+In addition to tile grid conversions within the same projection can convert between GCS (lat-lon), Web Mercator and WGS84 Mercator.
 
 # Building
 
-Requires apache httpd, libapr-1, libjpeg, libpng and zlib to be available for linking and at runtime.
-In linux this means the runtime and the development packages have to be installed.
-In Windows, the header files are expected to be in the zlib, png and jpeg subfolders in the same directory as the project files, and the httpd and apr in \Apache24\include. The libraries for all the above packages should be available in \Apache24\lib and \Apache24\bin
+Requires libahtse, apache httpd, libapr to be available for linking and at runtime.
+In Windows, headers shoudl be in \HTTPD\include. The libraries for all the above packages should be available in \HTTPD\lib and \HTTPD\bin
 
 # Usage
 
@@ -87,10 +87,7 @@ Optional, if set the module only responds to indirect requests
   - If on, use nearest neighbor resampling instead of bilinear interpolation
 
 ## Radius value
-  - The planet radius in meters.  Used in reprojection calculations. Defaults to earth major radius
+  - The planet radius in meters, used in reprojection calculations. Default is the earth major radius
 
 ## Transparent On
   - If set, the 0 value pixels in the output will be set as transparent (PNG only)
-
-# Ways to use
-If the input and output size and alignment match, it can be used to change quality or the format
