@@ -409,13 +409,17 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         storage_manager src(rctx.buffer, rctx.size);
         apr_uint32_t sig;
         memcpy(&sig, rctx.buffer, sizeof(sig));
+        // Set expected values
+        memset(&params, 0, sizeof(params));
+        params.size = cfg->inraster.pagesize;
+        params.dt = cfg->inraster.datatype;
         switch (sig)
         {
         case JPEG_SIG:
-            error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
+            error_message = jpeg_stride_decode(params, src, b);
             break;
         case PNG_SIG:
-            error_message = png_stride_decode(params, cfg->inraster, src, b);
+            error_message = png_stride_decode(params, src, b);
             break;
         default:
             error_message = "Unsupported format received";
@@ -706,17 +710,18 @@ static int handler(request_rec *r)
 
     if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
         jpeg_params params;
+        set_jpeg_params(cfg->raster,&params);
         params.quality = static_cast<int>(cfg->quality);
-        error_message = jpeg_encode(params, cfg->raster, raw, dst);
+        error_message = jpeg_encode(params, raw, dst);
     }
     else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
         png_params params;
-        set_def_png_params(cfg->raster, &params);
+        set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
         if (cfg->has_transparency)
             params.has_transparency = true;
-        error_message = png_encode(params, cfg->raster, raw, dst);
+        error_message = png_encode(params, raw, dst);
     }
 
     if (error_message) {
