@@ -318,28 +318,27 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     apr_uint64_t &etag_out = info.seed;
     const char *error_message;
 
+    // a reasonable number of input tiles, 64 is a good figure
     int nt = ntiles(tl, br);
-    // Should have a reasonable number of input tiles, 64 is a good figure
     SERVER_ERR_IF(nt > 6, r, "Too many input tiles required, maximum is 64");
 
-    // Allocate a buffer for receiving responses
-    receive_ctx rctx;
-    rctx.maxsize = static_cast<int>(cfg->max_input_size);
-    rctx.buffer = reinterpret_cast<char *>(apr_palloc(r->pool, rctx.maxsize));
+    // Allocate a buffer for receiving responses, gets reused
+    storage_manager src;
+    src.size = static_cast<int>(cfg->max_input_size);
+    src.buffer = reinterpret_cast<char*>(apr_palloc(r->pool, src.size));
 
-    codec_params params;
     int pixel_size = GDTGetSize(cfg->inraster.datatype);
 
     // inraster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);
     int pagesize = int(input_line_width * cfg->inraster.pagesize.y);
 
-    params.line_stride = int((br.x - tl.x) * input_line_width);
+    // Output buffer
     apr_size_t bufsize = static_cast<apr_size_t>(pagesize) * nt;
     if (*buffer == nullptr) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
-    // Count of good tiles
+    // Count of tiles with data
     int count = 0;
     const char* user_agent = apr_table_get(r->headers_in, "User-Agent");
     user_agent = (user_agent == nullptr) ? USER_AGENT :
@@ -353,51 +352,33 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
             apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x),
             cfg->postfix, NULL);
 
+        subr srequest(r);
+        srequest.agent = user_agent;
+
         LOG(r, "Requesting %s", sub_uri);
-        request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
-
-        // Location of first byte of this input tile
-        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x)
-            + input_line_width * (x - tl.x);
-
-        // Set up user agent signature, prepend the info
-        apr_table_setn(rr->headers_in, "User-Agent", user_agent);
-        rctx.size = 0; // Reset the receive size
-        ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, rr, rr->connection);
-
-        // This returns http status, aka 404
-        // But returns 0 if code is 200
-        int rr_status = ap_run_sub_req(rr); // This returns http status, aka 404
-        ap_remove_output_filter(rf);
-        // Capture the tag before nuking the subrequest
-
-        const char* ETagIn = apr_table_get(rr->headers_out, "ETag");
-        if (ETagIn)
-            ETagIn = apr_pstrdup(r->pool, ETagIn);
-        ap_destroy_sub_req(rr);
-
-        if (rr_status != APR_SUCCESS) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                "Subrequest %s failed, status %u", sub_uri, rr_status);
-            if (rr_status != HTTP_NOT_FOUND)
-                return rr_status;
-            continue; // Ignore not found errors, assume empty (zero)
+        src.size = static_cast<int>(cfg->max_input_size);
+        auto status = srequest.fetch(sub_uri, src);
+        if (status != APR_SUCCESS) {
+            if (status == HTTP_NOT_FOUND)
+                continue; // Ignore errors
+            return status; // Othey type of error, passed through
         }
 
         apr_uint64_t etag;
         int empty_flag = 0;
-        if (nullptr != ETagIn) {
-            etag = base32decode(ETagIn, &empty_flag);
-            if (empty_flag) continue; // Ignore empty input tiles
+        if (!srequest.ETag.empty()) {
+            etag = base32decode(srequest.ETag.c_str(), &empty_flag);
+            if (empty_flag)
+                continue; // Ignore empty input tiles, they don't get counted
         }
         else { // Input came without an ETag, make one up
-            etag = rctx.size; // Start with the input tile size
+            etag = src.size; // Start with the input tile size
             // And pick some data out of the input buffer, towards the end
-            if (rctx.size > 50) {
-                char *tptr = rctx.buffer + rctx.size - 24; // Temporary pointer
+            if (src.size > 50) {
+                char *tptr = src.buffer + src.size - 24; // Temporary pointer
                 tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
                 etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
-                tptr = rctx.buffer + rctx.size - 35; // Temporary pointer
+                tptr = src.buffer + src.size - 35; // Temporary pointer
                 tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
                 etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
             }
@@ -406,13 +387,20 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
         etag_out ^= etag; // And combine it with the incoming tile etag
 
-        storage_manager src(rctx.buffer, rctx.size);
-        apr_uint32_t sig;
-        memcpy(&sig, rctx.buffer, sizeof(sig));
         // Set expected values
+        codec_params params;
         memset(&params, 0, sizeof(params));
         params.size = cfg->inraster.pagesize;
         params.dt = cfg->inraster.datatype;
+        params.line_stride = int((br.x - tl.x) * input_line_width);
+
+        // Location of first byte of this input tile
+        void* b = (char*)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x)
+            + input_line_width * (x - tl.x);
+
+        // This should be moved to libahtse, format independent stride decode
+        apr_uint32_t sig = 0;
+        memcpy(&sig, src.buffer, sizeof(sig));
         switch (sig)
         {
         case JPEG_SIG:
@@ -751,7 +739,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     err_message = const_cast<char *>(configRaster(cmd->pool, kvp, c->raster));
     if (err_message) return err_message;
 
-    // Output mime type
+    // Output mime type, defaults to jpeg
     line = apr_table_get(kvp, "MimeType");
     c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
 
