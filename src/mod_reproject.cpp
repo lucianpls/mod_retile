@@ -316,7 +316,6 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
     const  sz &tl = info.tl, &br = info.br;
     repro_conf *cfg = info.c;
     apr_uint64_t &etag_out = info.seed;
-    const char *error_message;
 
     // a reasonable number of input tiles, 64 is a good figure
     int nt = ntiles(tl, br);
@@ -398,26 +397,11 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         void* b = (char*)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x)
             + input_line_width * (x - tl.x);
 
-        // This should be moved to libahtse, format independent stride decode
-        apr_uint32_t sig = 0;
-        memcpy(&sig, src.buffer, sizeof(sig));
-        switch (sig)
-        {
-        case JPEG_SIG:
-            error_message = jpeg_stride_decode(params, src, b);
-            break;
-        case PNG_SIG:
-            error_message = png_stride_decode(params, src, b);
-            break;
-        default:
-            error_message = "Unsupported format received";
-        }
-
+        const char* error_message = stride_decode(params, src, b);
         if (error_message) { // Something went wrong
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
             return HTTP_NOT_FOUND;
         }
-
         count++; // count the valid tiles
     }
     return count ? APR_SUCCESS : HTTP_NOT_FOUND;
@@ -624,9 +608,6 @@ static int handler(request_rec *r)
         tile.x >= cfg->raster.rsets[tile.l].w ||
         tile.y >= cfg->raster.rsets[tile.l].h)
         return HTTP_BAD_REQUEST;
-
-    // Need to have mod_receive available
-    SERVER_ERR_IF(!ap_get_output_filter_handle("Receive"), r, "mod_receive not installed");
 
     tile_to_bbox(cfg->raster, &(info.out_tile), info.out_bbox);
     // calculate the input projection equivalent bbox
@@ -850,8 +831,17 @@ static const command_rec cmds[] =
     { NULL }
 };
 
+// Runs after the configuration completes
+static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* main_server) {
+    if (!ap_get_output_filter_handle("Receive"))
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, main_server, 
+            "Receive filter (mod_receive) required for proper operation");
+    return OK;
+}
+
 static void register_hooks(apr_pool_t *p) {
     ap_hook_handler(handler, nullptr, nullptr, APR_HOOK_MIDDLE);
+    ap_hook_post_config(post_conf, nullptr, nullptr, APR_HOOK_MIDDLE);
 }
 
 module AP_MODULE_DECLARE_DATA reproject_module = {
