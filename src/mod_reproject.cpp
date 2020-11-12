@@ -386,11 +386,8 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
         etag_out ^= etag; // And combine it with the incoming tile etag
 
-        // Set expected values
-        codec_params params;
-        memset(&params, 0, sizeof(params));
-        params.size = cfg->inraster.pagesize;
-        params.dt = cfg->inraster.datatype;
+        // Set expected values for decoder
+        codec_params params(cfg->inraster);
         params.line_stride = int((br.x - tl.x) * input_line_width);
 
         // Location of first byte of this input tile
@@ -464,10 +461,9 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     // single band optimization
     if (1 == colors) {
         for (int y = 0; y < dst.size.y; y++) {
-            const WT vw = v[y].w;
-            for (int x = 0; x < dst.size.x; x++)
-            {
-                const WT hw = h[x].w;
+            const WT vw = static_cast<WT>(v[y].w);
+            for (int x = 0; x < dst.size.x; x++) {
+                const WT hw = static_cast<WT>(h[x].w);
                 const int idx = slw * v[y].line + h[x].line; // high left index
                 const WT lo = static_cast<WT>(s[idx - slw - 1]) * (256 - hw)
                     + static_cast<WT>(s[idx - slw]) * hw;
@@ -482,16 +478,15 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
 
     // More than one band
     for (int y = 0; y < dst.size.y; y++) {
-        const WT vw = v[y].w;
-        for (int x = 0; x < dst.size.x; x++)
-        {
-            const WT hw = h[x].w;
+        const WT vw = static_cast<WT>(v[y].w);
+        for (int x = 0; x < dst.size.x; x++) {
+            const WT hw = static_cast<WT>(h[x].w);
             int idx = slw * v[y].line + h[x].line * colors; // high left index
-            for (int c = 0; c < colors; c++) {
-                const WT lo = static_cast<WT>(s[idx + c - slw]) * hw +
-                    static_cast<WT>(s[idx + c - slw - colors]) * (256 - hw);
-                const WT hi = static_cast<WT>(s[idx + c]) * hw +
-                    static_cast<WT>(s[idx + c - colors]) * (256 - hw);
+            for (int c = 0; c < colors; c++, idx++) {
+                const WT lo = static_cast<WT>(s[idx - slw]) * hw +
+                    static_cast<WT>(s[idx - slw - colors]) * (256 - hw);
+                const WT hi = static_cast<WT>(s[idx]) * hw +
+                    static_cast<WT>(s[idx - colors]) * (256 - hw);
                 const WT value = hi * vw + lo * (256 - vw);
                 *data++ = static_cast<T>(value / (256 * 256));
             }
@@ -517,7 +512,7 @@ template<typename T = apr_byte_t> static void interpolateNN(
 
     if (colors == 1) { // optimization, only two loops
         for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
-            int vidx = static_cast<int>(src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0)));
+            int vidx = static_cast<int>(src.size.x * (static_cast<size_t>(v[y].line) - ((v[y].w < 128) ? 1 : 0)));
             for (auto const &hid : hpick)
                 *data++ = s[vidx + hid];
         }
@@ -525,7 +520,7 @@ template<typename T = apr_byte_t> static void interpolateNN(
     }
 
     for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
-        int vidx = static_cast<int>(colors * src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0)));
+        int vidx = static_cast<int>(colors * src.size.x * (static_cast<size_t>(v[y].line) - ((v[y].w < 128) ? 1 : 0)));
         for (auto const &hid : hpick)
             for (int c = 0; c < colors; c++)
                 *data++ = s[vidx + hid + c];
@@ -537,18 +532,19 @@ void resample(const repro_conf *cfg, const iline *h,
     const interpolation_buffer &src, interpolation_buffer &dst)
 {
 #define RESAMP(T) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T>(src, dst, h, v)
+#define RESAMPwT(T, WT) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T, WT>(src, dst, h, v)
     const iline *v = h + dst.size.x;
     switch (cfg->raster.datatype) {
-    case GDT_UInt16:
-        RESAMP(apr_uint16_t);
-        break;
-    case GDT_Int16:
-        RESAMP(apr_int16_t);
-        break;
+    case GDT_UInt16: RESAMP(apr_uint16_t); break;
+    case GDT_Int16: RESAMP(apr_int16_t); break;
+    case GDT_UInt32: RESAMPwT(apr_uint32_t, apr_uint64_t); break;
+    case GDT_Int32: RESAMPwT(apr_int32_t, apr_int64_t); break;
+    case GDT_Float: RESAMPwT(float, float); break;
     default: // Byte
         RESAMP(apr_byte_t);
     }
 #undef RESAMP
+#undef RESAMPwT
 }
 
 // The x dimension is most of the time linear, convenience function
