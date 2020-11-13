@@ -673,13 +673,18 @@ static int handler(request_rec *r)
     dst.buffer = static_cast<char*>(apr_palloc(r->pool, dst.size));
     const char *error_message = "Unknown output format requested";
 
-    if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
+    // This is very fragile
+    // TODO: Implement output image selection in libahtse
+    switch (cfg->raster.format) {
+    case IMG_JPEG:
+    case IMG_JPEG_ZEN: {
         jpeg_params params;
-        set_jpeg_params(cfg->raster,&params);
+        set_jpeg_params(cfg->raster, &params);
         params.quality = static_cast<int>(cfg->quality);
         error_message = jpeg_encode(params, raw, dst);
     }
-    else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
+                     break;
+    case IMG_PNG: {
         png_params params;
         set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
@@ -687,6 +692,16 @@ static int handler(request_rec *r)
         if (cfg->has_transparency)
             params.has_transparency = true;
         error_message = png_encode(params, raw, dst);
+    }
+                break;
+    case IMG_LERC: {
+        lerc_params params;
+        set_lerc_params(cfg->raster, &params);
+        error_message = lerc_encode(params, raw, dst);
+    }
+                 break;
+    default:
+        error_message = "Unsupported output format";
     }
 
     if (error_message) {
