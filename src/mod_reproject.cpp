@@ -445,6 +445,7 @@ static void adjust_itable(iline *table, int n, unsigned int max_avail) {
 struct interpolation_buffer {
     void *buffer;       // Location of first value per line
     sz size;            // Describes the organization of the buffer
+    int pixel_size;     // in bytes
 };
 
 // Perform the actual interpolation using ilines, working type WT
@@ -574,6 +575,15 @@ static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
     }
 }
 
+static void dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
+#if defined(_DEBUG)
+    FILE* f = fopen(filen, "wb");
+    fprintf(f, "P5 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size == 1 ? 255 : 65535);
+    fwrite(b.buffer, b.size.x * b.pixel_size, b.size.y, f);
+    fclose(f);
+#endif
+}
+
 static int handler(request_rec *r)
 {
     if (r->method_number != M_GET)
@@ -651,11 +661,12 @@ static int handler(request_rec *r)
     raw.buffer = static_cast<char *>(apr_palloc(r->pool, raw.size));
 
     // Set up the input and output 2D interpolation buffers
-    interpolation_buffer ib = { buffer, cfg->inraster.pagesize };
+    interpolation_buffer ib = { buffer, cfg->inraster.pagesize, pixel_size };
     // The input buffer contains multiple input pages
     ib.size.x *= (info.br.x - info.tl.x);
     ib.size.y *= (info.br.y - info.tl.y);
-    interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize };
+    // dump_interpolation_buffer(ib, "/data/temp/ib.pgm");
+    interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize, pixel_size };
 
     iline *table = static_cast<iline *>(apr_palloc(r->pool, static_cast<apr_size_t>(sizeof(iline)*(ob.size.x + ob.size.y))));
     iline *ytable = table + ob.size.x;
@@ -666,6 +677,7 @@ static int handler(request_rec *r)
     prep_y(info, ytable, cyf[cfg->code]);
     adjust_itable(ytable, static_cast<int>(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
     resample(cfg, table, ib, ob);    // Perform the actual resampling
+    // dump_interpolation_buffer(ob, "/data/temp/ob.pgm");
 
     // A buffer for the output tile
     storage_manager dst;
@@ -676,8 +688,8 @@ static int handler(request_rec *r)
     // This is very fragile
     // TODO: Implement output image selection in libahtse
     switch (cfg->raster.format) {
-    case IMG_JPEG:
-    case IMG_JPEG_ZEN: {
+    case IMG_ANY:
+    case IMG_JPEG: {
         jpeg_params params;
         set_jpeg_params(cfg->raster, &params);
         params.quality = static_cast<int>(cfg->quality);
@@ -730,6 +742,11 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (NULL == kvp) return err_message;
     err_message = const_cast<char *>(configRaster(cmd->pool, kvp, c->raster));
     if (err_message) return err_message;
+
+    // Check some basic errors
+    // In theory, we could alow the sign/unsigned to slip through
+    if (GDTGetSize(c->raster.datatype) != GDTGetSize(c->inraster.datatype))
+        return "Input datatype different from output";
 
     // Output mime type, defaults to jpeg
     line = apr_table_get(kvp, "MimeType");
@@ -843,9 +860,9 @@ static const command_rec cmds[] =
 };
 
 // Runs after the configuration completes
-static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* main_server) {
+static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* s) {
     if (!ap_get_output_filter_handle("Receive"))
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, main_server, 
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
             "Receive filter (mod_receive) required for proper operation");
     return OK;
 }
