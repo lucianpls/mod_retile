@@ -575,14 +575,16 @@ static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
     }
 }
 
-static void dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
 #if defined(_DEBUG)
+static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
     FILE* f = fopen(filen, "wb");
     fprintf(f, "P5 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size == 1 ? 255 : 65535);
     fwrite(b.buffer, b.size.x * b.pixel_size, b.size.y, f);
     fclose(f);
-#endif
 }
+#else
+#define DEBUG_dump_interpolation_buffer()
+#endif
 
 static int handler(request_rec *r)
 {
@@ -665,7 +667,7 @@ static int handler(request_rec *r)
     // The input buffer contains multiple input pages
     ib.size.x *= (info.br.x - info.tl.x);
     ib.size.y *= (info.br.y - info.tl.y);
-    // dump_interpolation_buffer(ib, "/data/temp/ib.pgm");
+    DEBUG_dump_interpolation_buffer(ib, "/data/temp/ib.pgm");
     interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize, pixel_size };
 
     iline *table = static_cast<iline *>(apr_palloc(r->pool, static_cast<apr_size_t>(sizeof(iline)*(ob.size.x + ob.size.y))));
@@ -677,7 +679,7 @@ static int handler(request_rec *r)
     prep_y(info, ytable, cyf[cfg->code]);
     adjust_itable(ytable, static_cast<int>(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
     resample(cfg, table, ib, ob);    // Perform the actual resampling
-    // dump_interpolation_buffer(ob, "/data/temp/ob.pgm");
+    DEBUG_dump_interpolation_buffer(ob, "/data/temp/ob.pgm");
 
     // A buffer for the output tile
     storage_manager dst;
