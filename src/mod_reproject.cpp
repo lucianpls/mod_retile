@@ -583,7 +583,7 @@ static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const
     fclose(f);
 }
 #else
-#define DEBUG_dump_interpolation_buffer()
+#define DEBUG_dump_interpolation_buffer(a,b)
 #endif
 
 static int handler(request_rec *r)
