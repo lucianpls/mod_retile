@@ -48,7 +48,7 @@ Optional, if set the module only responds to indirect requests
   -- Mercator, EPSG:3395
   
 ## DataType type
-  - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive
+  - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32, Float.  Case insensitive
  
 ## SkippedLevels N
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
@@ -66,7 +66,10 @@ Optional, if set the module only responds to indirect requests
   - Size is required, Offset defaults to zero and filename defaults to sourcepath
 
 ## MimeType mtype
-  - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type
+  - Output mime type, defaults to input format.  image/jpeg, image/png, raster/lerc.  If specified, forces the output type
+
+## Format mtype
+  - Output format
 
 ## InputBufferSize size
   - Buffer for one input tile, default is 1MB, should be larger than the maximum expected input tile size
