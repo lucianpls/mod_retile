@@ -11,8 +11,6 @@
 // TODO: Allow overlap between tiles
 
 #include <ahtse.h>
-// From mod_receive
-#include <receive_context.h>
 
 #include <httpd.h>
 #include <http_config.h>
@@ -126,14 +124,14 @@ static coord_conv_f* cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
 #define USER_AGENT "AHTSE Reproject"
 
 struct  repro_conf {
-    // The reprojection function to be used, also used as an enable flag
-    PCode code;
-
     // The output and input raster figures
     TiledRaster raster, inraster;
 
     // local web path to redirect the source requests
-    const char* source, * postfix;
+    const char* source, * suffix;
+
+    // The reprojection function to be used, also used as an enable flag
+    PCode code;
 
     // array of guard regex pointers, one of them has to match
     apr_array_header_t* arr_rxp;
@@ -185,17 +183,6 @@ struct work {
     int in_level;
 };
 
-static void *create_dir_config(apr_pool_t *p, char *path) {
-    repro_conf *c = reinterpret_cast<repro_conf *>(apr_pcalloc(p, sizeof(repro_conf)));
-    return c;
-}
-
-// Allow for one or more RegExp guard
-// One of them has to match if the request is to be considered
-static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern) {
-    return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
-}
-
 // Is the projection GCS
 static bool is_gcs(const char *projection) {
     return !apr_strnatcasecmp(projection, "GCS")
@@ -220,11 +207,6 @@ static bool is_m(const char *projection) {
 #define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
 #define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
 #define IS_WM2M(cfg) (is_wm(cfg->inraster.projection) && is_m(cfg->raster.projection))
-
-static int etag_matches(request_rec *r, const char *ETag) {
-    const char *ETagIn = apr_table_get(r->headers_in, "If-None-Match");
-    return ETagIn != 0 && strstr(ETagIn, ETag);
-}
 
 // Pick an input level based on desired output resolution
 static int pick_input_level(work &info, double rx, double ry) {
@@ -311,11 +293,11 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 // Fetches and decodes all tiles between tl and br, writes output in buffer
 // aligned as a single raster
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
-static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
+static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
 {
-    const  sz &tl = info.tl, &br = info.br;
-    repro_conf *cfg = info.c;
-    apr_uint64_t &etag_out = info.seed;
+    const  sz& tl = info.tl, & br = info.br;
+    repro_conf* cfg = info.c;
+    apr_uint64_t& etag_out = info.seed;
 
     // a reasonable number of input tiles, 64 is a good figure
     int nt = ntiles(tl, br);
@@ -344,68 +326,66 @@ static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
         apr_pstrcat(r->pool, USER_AGENT ", ", user_agent, NULL);
 
     // Retrieve every required tile and decompress them in the right place
-    for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
-        char *sub_uri = apr_pstrcat(r->pool,
-            (tl.z == 0) ?
-            apr_psprintf(r->pool, "%s/%d/%d/%d", cfg->source, int(tl.l), y, x) :
-            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x),
-            cfg->postfix, NULL);
+    sz tile(tl);
+    for (tile.y = tl.y; tile.y < br.y; tile.y++) {
+        for (tile.x = tl.x; tile.x < br.x; tile.x++) {
+            char* sub_uri = tile_url(r->pool, cfg->source, tile, cfg->suffix);
+            subr srequest(r);
+            srequest.agent = user_agent;
 
-        subr srequest(r);
-        srequest.agent = user_agent;
-
-        LOG(r, "Requesting %s", sub_uri);
-        src.size = static_cast<int>(cfg->max_input_size);
-        auto status = srequest.fetch(sub_uri, src);
-        if (status != APR_SUCCESS) {
-            if (status == HTTP_NOT_FOUND)
-                continue; // Ignore errors
-            return status; // Othey type of error, passed through
-        }
-
-        apr_uint64_t etag;
-        int empty_flag = 0;
-        if (!srequest.ETag.empty()) {
-            etag = base32decode(srequest.ETag.c_str(), &empty_flag);
-            if (empty_flag)
-                continue; // Ignore empty input tiles, they don't get counted
-        }
-        else { // Input came without an ETag, make one up
-            etag = src.size; // Start with the input tile size
-            // And pick some data out of the input buffer, towards the end
-            if (src.size > 50) {
-                char *tptr = src.buffer + src.size - 24; // Temporary pointer
-                tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
-                etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
-                tptr = src.buffer + src.size - 35; // Temporary pointer
-                tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
-                etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+            LOG(r, "Requesting %s", sub_uri);
+            src.size = static_cast<int>(cfg->max_input_size);
+            auto status = srequest.fetch(sub_uri, src);
+            if (status != APR_SUCCESS) {
+                if (status == HTTP_NOT_FOUND)
+                    continue; // Ignore errors
+                return status; // Othey type of error, passed through
             }
+
+            apr_uint64_t etag;
+            int empty_flag = 0;
+            if (!srequest.ETag.empty()) {
+                etag = base32decode(srequest.ETag.c_str(), &empty_flag);
+                if (empty_flag)
+                    continue; // Ignore empty input tiles, they don't get counted
+            }
+            else { // Input came without an ETag, make one up
+                etag = src.size; // Start with the input tile size
+                // And pick some data out of the input buffer, towards the end
+                if (src.size > 50) {
+                    char* tptr = src.buffer + src.size - 24; // Temporary pointer
+                    tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
+                    etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+                    tptr = src.buffer + src.size - 35; // Temporary pointer
+                    tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
+                    etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+                }
+            }
+            // Build up the outgoing ETag
+            etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
+            etag_out ^= etag; // And combine it with the incoming tile etag
+
+            // Set expected values for decoder
+            codec_params params(cfg->inraster);
+            params.line_stride = int((br.x - tl.x) * input_line_width);
+
+            // Location of first byte of this input tile
+            void* b = (char*)(*buffer) + pagesize * (tile.y - tl.y) * (br.x - tl.x)
+                + input_line_width * (tile.x - tl.x);
+
+            const char* error_message = stride_decode(params, src, b);
+            if (error_message) { // Something went wrong
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
+                return HTTP_NOT_FOUND;
+            }
+            count++; // count the valid tiles
         }
-        // Build up the outgoing ETag
-        etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
-        etag_out ^= etag; // And combine it with the incoming tile etag
-
-        // Set expected values for decoder
-        codec_params params(cfg->inraster);
-        params.line_stride = int((br.x - tl.x) * input_line_width);
-
-        // Location of first byte of this input tile
-        void* b = (char*)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x)
-            + input_line_width * (x - tl.x);
-
-        const char* error_message = stride_decode(params, src, b);
-        if (error_message) { // Something went wrong
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
-            return HTTP_NOT_FOUND;
-        }
-        count++; // count the valid tiles
     }
     return count ? APR_SUCCESS : HTTP_NOT_FOUND;
 }
 
-// Interpolation line, contains the above line and the relative weight (never zero)
-// These don't have to be bit fields, but it keeps them smaller
+// Interpolation line, contains the ordinal of the line above and the relative weight for it (never zero)
+// These don't have to be bit fields, might be faster if they are not
 // w is weigth of next line *256, can be 0 but not 256.
 // line is the higher line to be interpolated, always positive
 struct iline {
@@ -583,7 +563,7 @@ static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const
     fclose(f);
 }
 #else
-#define DEBUG_dump_interpolation_buffer(a,b)
+#define DEBUG_dump_interpolation_buffer(...)
 #endif
 
 static int handler(request_rec *r)
@@ -645,15 +625,23 @@ static int handler(request_rec *r)
     // Incoming tiles buffer
     void *buffer = NULL;
     apr_status_t status = retrieve_source(r, info, &buffer);
-    if (APR_SUCCESS != status) return status;
+    if (APR_SUCCESS != status) {
+        if (HTTP_NOT_FOUND != status) {
+            LOG(r, "Receive failed with code %d for %s", status, r->uri);
+            return status;
+        }
+        LOGNOTE(r, "Receive failed with code %d for %s", status, r->uri);
+        return sendEmptyTile(r, cfg->raster.missing);
+    }
     // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
 
     // Check the etag match before preparing output
     char ETag[16];
+    // if the current tag is the missing tag, this is a missing tile
     tobase32(info.seed, ETag, info.seed == cfg->seed ? 1 : 0);
     apr_table_set(r->headers_out, "ETag", ETag);
-    if (etag_matches(r, ETag))
+    if (etagMatches(r, ETag))
         return HTTP_NOT_MODIFIED;
 
     // Outgoing raw tile buffer
@@ -687,7 +675,7 @@ static int handler(request_rec *r)
     dst.buffer = static_cast<char*>(apr_palloc(r->pool, dst.size));
     const char *error_message = "Unknown output format requested";
 
-    // This is very fragile
+    // This is fragile
     // TODO: Implement output image selection in libahtse
     switch (cfg->raster.format) {
     case IMG_ANY:
@@ -801,19 +789,24 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (line)
         c->has_transparency = getBool(line);
 
-    // Set the reprojection code
-    if (IS_AFFINE_SCALING(c))
-        c->code = P_AFFINE;
-    else if (IS_GCS2WM(c))
-        c->code = P_GCS2WM;
-    else if (IS_WM2GCS(c))
-        c->code = P_WM2GCS;
-    else if (IS_WM2M(c))
-        c->code = P_WM2M;
-    else
-        return "Can't find reprojection function";
+    // Set the reprojection code, waterfall test
+    // First true test sets the value
+    c->code =
+        IS_AFFINE_SCALING(c) ? P_AFFINE :
+        IS_GCS2WM(c) ? P_GCS2WM :
+        IS_WM2GCS(c) ? P_WM2GCS :
+        IS_WM2M(c) ? P_WM2M :
+        P_COUNT;
 
-    return nullptr;
+    return c->code < P_COUNT ? nullptr : "Can't find reprojection function";
+}
+
+// Runs after the configuration completes
+static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* s) {
+    if (!ap_get_output_filter_handle("Receive"))
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+            "Receive filter (mod_receive) required for proper operation");
+    return OK;
 }
 
 static const command_rec cmds[] =
@@ -828,26 +821,18 @@ static const command_rec cmds[] =
 
     AP_INIT_TAKE1(
     "Reproject_RegExp",
-    (cmd_func)set_regexp,
+    (cmd_func)set_regexp<repro_conf>,
     0, // Self-pass argument
     ACCESS_CONF, // availability
     "One or more, regular expression that the URL has to match"
     ),
 
-    AP_INIT_TAKE1(
+    AP_INIT_TAKE12(
     "Reproject_Source",
-    (cmd_func)ap_set_string_slot,
-    (void *)APR_OFFSETOF(repro_conf, source),
+    (cmd_func)set_source<repro_conf>,
+    0,
     ACCESS_CONF,
     "Required, internal redirect path for the source"
-    ),
-
-    AP_INIT_TAKE1(
-    "Reproject_SourcePostfix",
-    (cmd_func)ap_set_string_slot,
-    (void *)APR_OFFSETOF(repro_conf, postfix),
-    ACCESS_CONF,
-    "Optional, internal redirect path ending, to be added after the M/L/R/C"
     ),
 
     AP_INIT_FLAG(
@@ -861,14 +846,6 @@ static const command_rec cmds[] =
     { NULL }
 };
 
-// Runs after the configuration completes
-static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* s) {
-    if (!ap_get_output_filter_handle("Receive"))
-        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
-            "Receive filter (mod_receive) required for proper operation");
-    return OK;
-}
-
 static void register_hooks(apr_pool_t *p) {
     ap_hook_handler(handler, nullptr, nullptr, APR_HOOK_MIDDLE);
     ap_hook_post_config(post_conf, nullptr, nullptr, APR_HOOK_MIDDLE);
@@ -876,7 +853,7 @@ static void register_hooks(apr_pool_t *p) {
 
 module AP_MODULE_DECLARE_DATA reproject_module = {
     STANDARD20_MODULE_STUFF,
-    create_dir_config,
+    pcreate<repro_conf>,
     NULL, // No dir_merge
     NULL, // No server_config
     NULL, // No server_merge
