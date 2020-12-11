@@ -11,8 +11,6 @@
 // TODO: Allow overlap between tiles
 
 #include <ahtse.h>
-// From mod_receive
-#include <receive_context.h>
 
 #include <httpd.h>
 #include <http_config.h>
@@ -126,14 +124,14 @@ static coord_conv_f* cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
 #define USER_AGENT "AHTSE Reproject"
 
 struct  repro_conf {
-    // The reprojection function to be used, also used as an enable flag
-    PCode code;
-
     // The output and input raster figures
     TiledRaster raster, inraster;
 
     // local web path to redirect the source requests
-    const char* source, * postfix;
+    const char* source, * suffix;
+
+    // The reprojection function to be used, also used as an enable flag
+    PCode code;
 
     // array of guard regex pointers, one of them has to match
     apr_array_header_t* arr_rxp;
@@ -185,17 +183,6 @@ struct work {
     int in_level;
 };
 
-static void *create_dir_config(apr_pool_t *p, char *path) {
-    repro_conf *c = reinterpret_cast<repro_conf *>(apr_pcalloc(p, sizeof(repro_conf)));
-    return c;
-}
-
-// Allow for one or more RegExp guard
-// One of them has to match if the request is to be considered
-static const char *set_regexp(cmd_parms *cmd, repro_conf *c, const char *pattern) {
-    return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
-}
-
 // Is the projection GCS
 static bool is_gcs(const char *projection) {
     return !apr_strnatcasecmp(projection, "GCS")
@@ -220,11 +207,6 @@ static bool is_m(const char *projection) {
 #define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
 #define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
 #define IS_WM2M(cfg) (is_wm(cfg->inraster.projection) && is_m(cfg->raster.projection))
-
-static int etag_matches(request_rec *r, const char *ETag) {
-    const char *ETagIn = apr_table_get(r->headers_in, "If-None-Match");
-    return ETagIn != 0 && strstr(ETagIn, ETag);
-}
 
 // Pick an input level based on desired output resolution
 static int pick_input_level(work &info, double rx, double ry) {
@@ -311,128 +293,99 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 // Fetches and decodes all tiles between tl and br, writes output in buffer
 // aligned as a single raster
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
-static apr_status_t retrieve_source(request_rec *r, work &info, void **buffer)
+static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
 {
-    const  sz &tl = info.tl, &br = info.br;
-    repro_conf *cfg = info.c;
-    apr_uint64_t &etag_out = info.seed;
-    const char *error_message;
+    const  sz& tl = info.tl, & br = info.br;
+    repro_conf* cfg = info.c;
+    apr_uint64_t& etag_out = info.seed;
 
+    // a reasonable number of input tiles, 64 is a good figure
     int nt = ntiles(tl, br);
-    // Should have a reasonable number of input tiles, 64 is a good figure
     SERVER_ERR_IF(nt > 6, r, "Too many input tiles required, maximum is 64");
 
-    // Allocate a buffer for receiving responses
-    receive_ctx rctx;
-    rctx.maxsize = static_cast<int>(cfg->max_input_size);
-    rctx.buffer = reinterpret_cast<char *>(apr_palloc(r->pool, rctx.maxsize));
+    // Allocate a buffer for receiving responses, gets reused
+    storage_manager src;
+    src.size = static_cast<int>(cfg->max_input_size);
+    src.buffer = reinterpret_cast<char*>(apr_palloc(r->pool, src.size));
 
-    codec_params params;
     int pixel_size = GDTGetSize(cfg->inraster.datatype);
 
     // inraster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);
     int pagesize = int(input_line_width * cfg->inraster.pagesize.y);
 
-    params.line_stride = int((br.x - tl.x) * input_line_width);
+    // Output buffer
     apr_size_t bufsize = static_cast<apr_size_t>(pagesize) * nt;
     if (*buffer == nullptr) // Allocate the buffer if not provided, filled with zeros
         *buffer = apr_pcalloc(r->pool, bufsize);
 
-    // Count of good tiles
+    // Count of tiles with data
     int count = 0;
     const char* user_agent = apr_table_get(r->headers_in, "User-Agent");
     user_agent = (user_agent == nullptr) ? USER_AGENT :
         apr_pstrcat(r->pool, USER_AGENT ", ", user_agent, NULL);
 
     // Retrieve every required tile and decompress them in the right place
-    for (int y = int(tl.y); y < br.y; y++) for (int x = int(tl.x); x < br.x; x++) {
-        char *sub_uri = apr_pstrcat(r->pool,
-            (tl.z == 0) ?
-            apr_psprintf(r->pool, "%s/%d/%d/%d", cfg->source, int(tl.l), y, x) :
-            apr_psprintf(r->pool, "%s/%d/%d/%d/%d", cfg->source, int(tl.z), int(tl.l), y, x),
-            cfg->postfix, NULL);
+    sz tile(tl);
+    for (tile.y = tl.y; tile.y < br.y; tile.y++) {
+        for (tile.x = tl.x; tile.x < br.x; tile.x++) {
+            char* sub_uri = tile_url(r->pool, cfg->source, tile, cfg->suffix);
+            subr srequest(r);
+            srequest.agent = user_agent;
 
-        LOG(r, "Requesting %s", sub_uri);
-        request_rec *rr = ap_sub_req_lookup_uri(sub_uri, r, r->output_filters);
-
-        // Location of first byte of this input tile
-        void *b = (char *)(*buffer) + pagesize * (y - tl.y) * (br.x - tl.x)
-            + input_line_width * (x - tl.x);
-
-        // Set up user agent signature, prepend the info
-        apr_table_setn(rr->headers_in, "User-Agent", user_agent);
-        rctx.size = 0; // Reset the receive size
-        ap_filter_t *rf = ap_add_output_filter("Receive", &rctx, rr, rr->connection);
-
-        // This returns http status, aka 404
-        // But returns 0 if code is 200
-        int rr_status = ap_run_sub_req(rr); // This returns http status, aka 404
-        ap_remove_output_filter(rf);
-        // Capture the tag before nuking the subrequest
-
-        const char* ETagIn = apr_table_get(rr->headers_out, "ETag");
-        if (ETagIn)
-            ETagIn = apr_pstrdup(r->pool, ETagIn);
-        ap_destroy_sub_req(rr);
-
-        if (rr_status != APR_SUCCESS) {
-            ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r,
-                "Subrequest %s failed, status %u", sub_uri, rr_status);
-            if (rr_status != HTTP_NOT_FOUND)
-                return rr_status;
-            continue; // Ignore not found errors, assume empty (zero)
-        }
-
-        apr_uint64_t etag;
-        int empty_flag = 0;
-        if (nullptr != ETagIn) {
-            etag = base32decode(ETagIn, &empty_flag);
-            if (empty_flag) continue; // Ignore empty input tiles
-        }
-        else { // Input came without an ETag, make one up
-            etag = rctx.size; // Start with the input tile size
-            // And pick some data out of the input buffer, towards the end
-            if (rctx.size > 50) {
-                char *tptr = rctx.buffer + rctx.size - 24; // Temporary pointer
-                tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
-                etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
-                tptr = rctx.buffer + rctx.size - 35; // Temporary pointer
-                tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
-                etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+            LOG(r, "Requesting %s", sub_uri);
+            src.size = static_cast<int>(cfg->max_input_size);
+            auto status = srequest.fetch(sub_uri, src);
+            if (status != APR_SUCCESS) {
+                if (status == HTTP_NOT_FOUND)
+                    continue; // Ignore errors
+                return status; // Othey type of error, passed through
             }
-        }
-        // Build up the outgoing ETag
-        etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
-        etag_out ^= etag; // And combine it with the incoming tile etag
 
-        storage_manager src(rctx.buffer, rctx.size);
-        apr_uint32_t sig;
-        memcpy(&sig, rctx.buffer, sizeof(sig));
-        switch (sig)
-        {
-        case JPEG_SIG:
-            error_message = jpeg_stride_decode(params, cfg->inraster, src, b);
-            break;
-        case PNG_SIG:
-            error_message = png_stride_decode(params, cfg->inraster, src, b);
-            break;
-        default:
-            error_message = "Unsupported format received";
-        }
+            apr_uint64_t etag;
+            int empty_flag = 0;
+            if (!srequest.ETag.empty()) {
+                etag = base32decode(srequest.ETag.c_str(), &empty_flag);
+                if (empty_flag)
+                    continue; // Ignore empty input tiles, they don't get counted
+            }
+            else { // Input came without an ETag, make one up
+                etag = src.size; // Start with the input tile size
+                // And pick some data out of the input buffer, towards the end
+                if (src.size > 50) {
+                    char* tptr = src.buffer + src.size - 24; // Temporary pointer
+                    tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
+                    etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+                    tptr = src.buffer + src.size - 35; // Temporary pointer
+                    tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
+                    etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
+                }
+            }
+            // Build up the outgoing ETag
+            etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
+            etag_out ^= etag; // And combine it with the incoming tile etag
 
-        if (error_message) { // Something went wrong
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
-            return HTTP_NOT_FOUND;
-        }
+            // Set expected values for decoder
+            codec_params params(cfg->inraster);
+            params.line_stride = int((br.x - tl.x) * input_line_width);
 
-        count++; // count the valid tiles
+            // Location of first byte of this input tile
+            void* b = (char*)(*buffer) + pagesize * (tile.y - tl.y) * (br.x - tl.x)
+                + input_line_width * (tile.x - tl.x);
+
+            const char* error_message = stride_decode(params, src, b);
+            if (error_message) { // Something went wrong
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decode from :%s", error_message, sub_uri);
+                return HTTP_NOT_FOUND;
+            }
+            count++; // count the valid tiles
+        }
     }
     return count ? APR_SUCCESS : HTTP_NOT_FOUND;
 }
 
-// Interpolation line, contains the above line and the relative weight (never zero)
-// These don't have to be bit fields, but it keeps them smaller
+// Interpolation line, contains the ordinal of the line above and the relative weight for it (never zero)
+// These don't have to be bit fields, might be faster if they are not
 // w is weigth of next line *256, can be 0 but not 256.
 // line is the higher line to be interpolated, always positive
 struct iline {
@@ -472,6 +425,7 @@ static void adjust_itable(iline *table, int n, unsigned int max_avail) {
 struct interpolation_buffer {
     void *buffer;       // Location of first value per line
     sz size;            // Describes the organization of the buffer
+    int pixel_size;     // in bytes
 };
 
 // Perform the actual interpolation using ilines, working type WT
@@ -488,10 +442,9 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     // single band optimization
     if (1 == colors) {
         for (int y = 0; y < dst.size.y; y++) {
-            const WT vw = v[y].w;
-            for (int x = 0; x < dst.size.x; x++)
-            {
-                const WT hw = h[x].w;
+            const WT vw = static_cast<WT>(v[y].w);
+            for (int x = 0; x < dst.size.x; x++) {
+                const WT hw = static_cast<WT>(h[x].w);
                 const int idx = slw * v[y].line + h[x].line; // high left index
                 const WT lo = static_cast<WT>(s[idx - slw - 1]) * (256 - hw)
                     + static_cast<WT>(s[idx - slw]) * hw;
@@ -506,16 +459,15 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
 
     // More than one band
     for (int y = 0; y < dst.size.y; y++) {
-        const WT vw = v[y].w;
-        for (int x = 0; x < dst.size.x; x++)
-        {
-            const WT hw = h[x].w;
+        const WT vw = static_cast<WT>(v[y].w);
+        for (int x = 0; x < dst.size.x; x++) {
+            const WT hw = static_cast<WT>(h[x].w);
             int idx = slw * v[y].line + h[x].line * colors; // high left index
-            for (int c = 0; c < colors; c++) {
-                const WT lo = static_cast<WT>(s[idx + c - slw]) * hw +
-                    static_cast<WT>(s[idx + c - slw - colors]) * (256 - hw);
-                const WT hi = static_cast<WT>(s[idx + c]) * hw +
-                    static_cast<WT>(s[idx + c - colors]) * (256 - hw);
+            for (int c = 0; c < colors; c++, idx++) {
+                const WT lo = static_cast<WT>(s[idx - slw]) * hw +
+                    static_cast<WT>(s[idx - slw - colors]) * (256 - hw);
+                const WT hi = static_cast<WT>(s[idx]) * hw +
+                    static_cast<WT>(s[idx - colors]) * (256 - hw);
                 const WT value = hi * vw + lo * (256 - vw);
                 *data++ = static_cast<T>(value / (256 * 256));
             }
@@ -541,7 +493,7 @@ template<typename T = apr_byte_t> static void interpolateNN(
 
     if (colors == 1) { // optimization, only two loops
         for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
-            int vidx = static_cast<int>(src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0)));
+            int vidx = static_cast<int>(src.size.x * (static_cast<size_t>(v[y].line) - ((v[y].w < 128) ? 1 : 0)));
             for (auto const &hid : hpick)
                 *data++ = s[vidx + hid];
         }
@@ -549,7 +501,7 @@ template<typename T = apr_byte_t> static void interpolateNN(
     }
 
     for (int y = 0; y < static_cast<int>(dst.size.y); y++) {
-        int vidx = static_cast<int>(colors * src.size.x * (v[y].line - ((v[y].w < 128) ? 1 : 0)));
+        int vidx = static_cast<int>(colors * src.size.x * (static_cast<size_t>(v[y].line) - ((v[y].w < 128) ? 1 : 0)));
         for (auto const &hid : hpick)
             for (int c = 0; c < colors; c++)
                 *data++ = s[vidx + hid + c];
@@ -561,18 +513,19 @@ void resample(const repro_conf *cfg, const iline *h,
     const interpolation_buffer &src, interpolation_buffer &dst)
 {
 #define RESAMP(T) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T>(src, dst, h, v)
+#define RESAMPwT(T, WT) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T, WT>(src, dst, h, v)
     const iline *v = h + dst.size.x;
     switch (cfg->raster.datatype) {
-    case GDT_UInt16:
-        RESAMP(apr_uint16_t);
-        break;
-    case GDT_Int16:
-        RESAMP(apr_int16_t);
-        break;
+    case GDT_UInt16: RESAMP(apr_uint16_t); break;
+    case GDT_Int16: RESAMP(apr_int16_t); break;
+    case GDT_UInt32: RESAMPwT(apr_uint32_t, apr_uint64_t); break;
+    case GDT_Int32: RESAMPwT(apr_int32_t, apr_int64_t); break;
+    case GDT_Float: RESAMPwT(float, float); break;
     default: // Byte
         RESAMP(apr_byte_t);
     }
 #undef RESAMP
+#undef RESAMPwT
 }
 
 // The x dimension is most of the time linear, convenience function
@@ -601,6 +554,17 @@ static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
             static_cast<int>(floor(256.0 * (pos - floor(pos))));
     }
 }
+
+#if defined(_DEBUG)
+static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
+    FILE* f = fopen(filen, "wb");
+    fprintf(f, "P5 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size == 1 ? 255 : 65535);
+    fwrite(b.buffer, b.size.x * b.pixel_size, b.size.y, f);
+    fclose(f);
+}
+#else
+#define DEBUG_dump_interpolation_buffer(...)
+#endif
 
 static int handler(request_rec *r)
 {
@@ -633,9 +597,6 @@ static int handler(request_rec *r)
         tile.y >= cfg->raster.rsets[tile.l].h)
         return HTTP_BAD_REQUEST;
 
-    // Need to have mod_receive available
-    SERVER_ERR_IF(!ap_get_output_filter_handle("Receive"), r, "mod_receive not installed");
-
     tile_to_bbox(cfg->raster, &(info.out_tile), info.out_bbox);
     // calculate the input projection equivalent bbox
     oebb.xmin = cxf[cfg->code](cfg->eres, info.out_bbox.xmin);
@@ -664,15 +625,23 @@ static int handler(request_rec *r)
     // Incoming tiles buffer
     void *buffer = NULL;
     apr_status_t status = retrieve_source(r, info, &buffer);
-    if (APR_SUCCESS != status) return status;
+    if (APR_SUCCESS != status) {
+        if (HTTP_NOT_FOUND != status) {
+            LOG(r, "Receive failed with code %d for %s", status, r->uri);
+            return status;
+        }
+        LOGNOTE(r, "Receive failed with code %d for %s", status, r->uri);
+        return sendEmptyTile(r, cfg->raster.missing);
+    }
     // back to absolute level for input tiles
     info.tl.l = info.br.l = input_l;
 
     // Check the etag match before preparing output
     char ETag[16];
+    // if the current tag is the missing tag, this is a missing tile
     tobase32(info.seed, ETag, info.seed == cfg->seed ? 1 : 0);
     apr_table_set(r->headers_out, "ETag", ETag);
-    if (etag_matches(r, ETag))
+    if (etagMatches(r, ETag))
         return HTTP_NOT_MODIFIED;
 
     // Outgoing raw tile buffer
@@ -682,11 +651,12 @@ static int handler(request_rec *r)
     raw.buffer = static_cast<char *>(apr_palloc(r->pool, raw.size));
 
     // Set up the input and output 2D interpolation buffers
-    interpolation_buffer ib = { buffer, cfg->inraster.pagesize };
+    interpolation_buffer ib = { buffer, cfg->inraster.pagesize, pixel_size };
     // The input buffer contains multiple input pages
     ib.size.x *= (info.br.x - info.tl.x);
     ib.size.y *= (info.br.y - info.tl.y);
-    interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize };
+    DEBUG_dump_interpolation_buffer(ib, "/data/temp/ib.pgm");
+    interpolation_buffer ob = { raw.buffer, cfg->raster.pagesize, pixel_size };
 
     iline *table = static_cast<iline *>(apr_palloc(r->pool, static_cast<apr_size_t>(sizeof(iline)*(ob.size.x + ob.size.y))));
     iline *ytable = table + ob.size.x;
@@ -697,6 +667,7 @@ static int handler(request_rec *r)
     prep_y(info, ytable, cyf[cfg->code]);
     adjust_itable(ytable, static_cast<int>(ob.size.y), static_cast<unsigned int>(ib.size.y - 1));
     resample(cfg, table, ib, ob);    // Perform the actual resampling
+    DEBUG_dump_interpolation_buffer(ob, "/data/temp/ob.pgm");
 
     // A buffer for the output tile
     storage_manager dst;
@@ -704,19 +675,35 @@ static int handler(request_rec *r)
     dst.buffer = static_cast<char*>(apr_palloc(r->pool, dst.size));
     const char *error_message = "Unknown output format requested";
 
-    if (NULL == cfg->mime_type || 0 == apr_strnatcmp(cfg->mime_type, "image/jpeg")) {
+    // This is fragile
+    // TODO: Implement output image selection in libahtse
+    switch (cfg->raster.format) {
+    case IMG_ANY:
+    case IMG_JPEG: {
         jpeg_params params;
+        set_jpeg_params(cfg->raster, &params);
         params.quality = static_cast<int>(cfg->quality);
-        error_message = jpeg_encode(params, cfg->raster, raw, dst);
+        error_message = jpeg_encode(params, raw, dst);
     }
-    else if (0 == apr_strnatcmp(cfg->mime_type, "image/png")) {
+                     break;
+    case IMG_PNG: {
         png_params params;
-        set_def_png_params(cfg->raster, &params);
+        set_png_params(cfg->raster, &params);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
         if (cfg->has_transparency)
             params.has_transparency = true;
-        error_message = png_encode(params, cfg->raster, raw, dst);
+        error_message = png_encode(params, raw, dst);
+    }
+                break;
+    case IMG_LERC: {
+        lerc_params params;
+        set_lerc_params(cfg->raster, &params);
+        error_message = lerc_encode(params, raw, dst);
+    }
+                 break;
+    default:
+        error_message = "Unsupported output format";
     }
 
     if (error_message) {
@@ -746,7 +733,12 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     err_message = const_cast<char *>(configRaster(cmd->pool, kvp, c->raster));
     if (err_message) return err_message;
 
-    // Output mime type
+    // Check some basic errors
+    // In theory, we could alow the sign/unsigned to slip through
+    if (GDTGetSize(c->raster.datatype) != GDTGetSize(c->inraster.datatype))
+        return "Input datatype different from output";
+
+    // Output mime type, defaults to jpeg
     line = apr_table_get(kvp, "MimeType");
     c->mime_type = (line) ? apr_pstrdup(cmd->pool, line) : "image/jpeg";
 
@@ -797,19 +789,24 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
     if (line)
         c->has_transparency = getBool(line);
 
-    // Set the reprojection code
-    if (IS_AFFINE_SCALING(c))
-        c->code = P_AFFINE;
-    else if (IS_GCS2WM(c))
-        c->code = P_GCS2WM;
-    else if (IS_WM2GCS(c))
-        c->code = P_WM2GCS;
-    else if (IS_WM2M(c))
-        c->code = P_WM2M;
-    else
-        return "Can't find reprojection function";
+    // Set the reprojection code, waterfall test
+    // First true test sets the value
+    c->code =
+        IS_AFFINE_SCALING(c) ? P_AFFINE :
+        IS_GCS2WM(c) ? P_GCS2WM :
+        IS_WM2GCS(c) ? P_WM2GCS :
+        IS_WM2M(c) ? P_WM2M :
+        P_COUNT;
 
-    return nullptr;
+    return c->code < P_COUNT ? nullptr : "Can't find reprojection function";
+}
+
+// Runs after the configuration completes
+static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* s) {
+    if (!ap_get_output_filter_handle("Receive"))
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+            "Receive filter (mod_receive) required for proper operation");
+    return OK;
 }
 
 static const command_rec cmds[] =
@@ -824,26 +821,18 @@ static const command_rec cmds[] =
 
     AP_INIT_TAKE1(
     "Reproject_RegExp",
-    (cmd_func)set_regexp,
+    (cmd_func)set_regexp<repro_conf>,
     0, // Self-pass argument
     ACCESS_CONF, // availability
     "One or more, regular expression that the URL has to match"
     ),
 
-    AP_INIT_TAKE1(
+    AP_INIT_TAKE12(
     "Reproject_Source",
-    (cmd_func)ap_set_string_slot,
-    (void *)APR_OFFSETOF(repro_conf, source),
+    (cmd_func)set_source<repro_conf>,
+    0,
     ACCESS_CONF,
     "Required, internal redirect path for the source"
-    ),
-
-    AP_INIT_TAKE1(
-    "Reproject_SourcePostfix",
-    (cmd_func)ap_set_string_slot,
-    (void *)APR_OFFSETOF(repro_conf, postfix),
-    ACCESS_CONF,
-    "Optional, internal redirect path ending, to be added after the M/L/R/C"
     ),
 
     AP_INIT_FLAG(
@@ -859,11 +848,12 @@ static const command_rec cmds[] =
 
 static void register_hooks(apr_pool_t *p) {
     ap_hook_handler(handler, nullptr, nullptr, APR_HOOK_MIDDLE);
+    ap_hook_post_config(post_conf, nullptr, nullptr, APR_HOOK_MIDDLE);
 }
 
 module AP_MODULE_DECLARE_DATA reproject_module = {
     STANDARD20_MODULE_STUFF,
-    create_dir_config,
+    pcreate<repro_conf>,
     NULL, // No dir_merge
     NULL, // No server_config
     NULL, // No server_merge

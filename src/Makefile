@@ -1,14 +1,16 @@
+MODULE = mod_reproject
 include Makefile.lcl
 
-C_SRC = mod_reproject.cpp JPEG_codec.cpp PNG_codec.cpp
-HEADER = mod_reproject.h
+C_SRC = $(MODULE).cpp
+HEADERS =
 
 FILES = $(C_SRC)
 OBJECTS = $(FILES:.cpp=.lo)
 
+CXXFLAGS = -prefer-pic -O2 -Wall
 DEFINES = -DLINUX -D_REENTRANT -D_GNU_SOURCE $(DEBUG)
 
-LIBS = -ljpeg -lpng -lstdc++
+LIBS = -L$(DEST) -lahtse -lstdc++
 
 # Create Makefile.lcl, which should define
 # MOD_PATH, the folder where the apache module should reside
@@ -22,12 +24,11 @@ TARGET = .libs/mod_reproject.so
 $(TARGET)       :       $(OBJECTS)
 	$(LIBTOOL) --mode=link g++ -o mod_reproject.la -rpath $(DEST) -module -avoid-version $^ $(LIBS)
 
-%.lo	:	%.cpp $(HEADER)
-	$(LIBTOOL) --mode=compile g++ -std=c++0x -prefer-pic -O2 -Wall $(DEFINES) $(INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
+%.lo	:	%.cpp $(HEADERS)
+	$(LIBTOOL) --mode=compile g++ -std=c++0x $(CXXFLAGS) $(DEFINES) $(INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
 
 install : $(TARGET)
 	sudo cp $(TARGET) $(DEST)
 
 clean   :
 	rm -rf .libs *.o *.lo *.slo *.la
-
