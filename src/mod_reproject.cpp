@@ -333,7 +333,7 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
             subr srequest(r);
             srequest.agent = user_agent;
 
-            LOG(r, "Requesting %s", sub_uri);
+            LOGNOTE(r, "Requesting %s", sub_uri);
             src.size = static_cast<int>(cfg->max_input_size);
             auto status = srequest.fetch(sub_uri, src);
             if (status != APR_SUCCESS) {
@@ -558,7 +558,9 @@ static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
 #if defined(_DEBUG)
 static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
     FILE* f = fopen(filen, "wb");
-    fprintf(f, "P5 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size == 1 ? 255 : 65535);
+    if (!f) return;
+    if (b.pixel_size < 3)
+        fprintf(f, "P5 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size == 1 ? 255 : 65535);
     fwrite(b.buffer, b.size.x * b.pixel_size, b.size.y, f);
     fclose(f);
 }
