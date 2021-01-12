@@ -1,4 +1,4 @@
-# mod_reproject [AHTSE](https://github.com/lucianpls/AHTSE)
+# mod_retile [AHTSE](https://github.com/lucianpls/AHTSE)
 
 An apache module that converts an AHTSE tile service from one projection or tiling grid to another. 
 In addition to tile grid conversions within the same projection can convert between GCS (lat-lon), Web Mercator and WGS84 Mercator.
