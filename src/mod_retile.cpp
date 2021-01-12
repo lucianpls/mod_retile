@@ -22,10 +22,10 @@
 #include <apr_strings.h>
 #include <vector>
 
-extern module AP_MODULE_DECLARE_DATA reproject_module;
+extern module AP_MODULE_DECLARE_DATA retile_module;
 
 #if defined(APLOG_USE_MODULE)
-APLOG_USE_MODULE(reproject);
+APLOG_USE_MODULE(retile);
 #endif
 
 NS_AHTSE_USE
@@ -121,7 +121,7 @@ typedef enum {
 static coord_conv_f* cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj };
 static coord_conv_f* cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
 
-#define USER_AGENT "AHTSE Reproject"
+#define USER_AGENT "AHTSE Retile"
 
 struct  repro_conf {
     // The output and input raster figures
@@ -573,7 +573,7 @@ static int handler(request_rec *r)
     if (r->method_number != M_GET)
         return DECLINED;
 
-    auto* cfg = get_conf<repro_conf>(r, &reproject_module);
+    auto* cfg = get_conf<repro_conf>(r, &retile_module);
     if (!cfg || cfg->code >= P_COUNT || !cfg->source ||
         (cfg->indirect && r->main == nullptr) ||
         !cfg->arr_rxp || !requestMatches(r, cfg->arr_rxp))
@@ -814,7 +814,7 @@ static int post_conf(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_
 static const command_rec cmds[] =
 {
     AP_INIT_TAKE2(
-    "Reproject_ConfigurationFiles",
+    "Retile_ConfigurationFiles",
     (cmd_func)read_config, // Callback
     0, // Self-pass argument
     ACCESS_CONF, // availability
@@ -822,7 +822,7 @@ static const command_rec cmds[] =
     ),
 
     AP_INIT_TAKE1(
-    "Reproject_RegExp",
+    "Retile_RegExp",
     (cmd_func)set_regexp<repro_conf>,
     0, // Self-pass argument
     ACCESS_CONF, // availability
@@ -830,7 +830,7 @@ static const command_rec cmds[] =
     ),
 
     AP_INIT_TAKE12(
-    "Reproject_Source",
+    "Retile_Source",
     (cmd_func)set_source<repro_conf>,
     0,
     ACCESS_CONF,
@@ -838,7 +838,7 @@ static const command_rec cmds[] =
     ),
 
     AP_INIT_FLAG(
-    "Reproject_Indirect",
+    "Retile_Indirect",
     (cmd_func) ap_set_flag_slot,
     (void *)APR_OFFSETOF(repro_conf, indirect),
     ACCESS_CONF,
@@ -853,7 +853,7 @@ static void register_hooks(apr_pool_t *p) {
     ap_hook_post_config(post_conf, nullptr, nullptr, APR_HOOK_MIDDLE);
 }
 
-module AP_MODULE_DECLARE_DATA reproject_module = {
+module AP_MODULE_DECLARE_DATA retile_module = {
     STANDARD20_MODULE_STUFF,
     pcreate<repro_conf>,
     NULL, // No dir_merge

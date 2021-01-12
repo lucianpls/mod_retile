@@ -1,4 +1,4 @@
-MODULE = mod_reproject
+MODULE = mod_retile
 include Makefile.lcl
 
 C_SRC = $(MODULE).cpp
@@ -17,12 +17,12 @@ LIBS = -L$(DEST) -lahtse -lstdc++
 # INCLUDES, includes for httpd, apr headers
 # For example look at Makefile.lcl.example
 
-TARGET = .libs/mod_reproject.so
+TARGET = .libs/$(MODULE).so
 
 # Can't use apxs to build c++ modules
 # The options used here might depend on how apache was built
 $(TARGET)       :       $(OBJECTS)
-	$(LIBTOOL) --mode=link g++ -o mod_reproject.la -rpath $(DEST) -module -avoid-version $^ $(LIBS)
+	$(LIBTOOL) --mode=link g++ -o $(MODULE).la -rpath $(DEST) -module -avoid-version $^ $(LIBS)
 
 %.lo	:	%.cpp $(HEADERS)
 	$(LIBTOOL) --mode=compile g++ -std=c++0x $(CXXFLAGS) $(DEFINES) $(INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
