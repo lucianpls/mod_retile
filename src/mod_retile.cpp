@@ -308,7 +308,7 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
     src.size = static_cast<int>(cfg->max_input_size);
     src.buffer = reinterpret_cast<char*>(apr_palloc(r->pool, src.size));
 
-    int pixel_size = GDTGetSize(cfg->inraster.datatype);
+    int pixel_size = getTypeSize(cfg->inraster.datatype);
 
     // inraster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);
@@ -516,11 +516,11 @@ void resample(const repro_conf *cfg, const iline *h,
 #define RESAMPwT(T, WT) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T, WT>(src, dst, h, v)
     const iline *v = h + dst.size.x;
     switch (cfg->raster.datatype) {
-    case GDT_UInt16: RESAMP(apr_uint16_t); break;
-    case GDT_Int16: RESAMP(apr_int16_t); break;
-    case GDT_UInt32: RESAMPwT(apr_uint32_t, apr_uint64_t); break;
-    case GDT_Int32: RESAMPwT(apr_int32_t, apr_int64_t); break;
-    case GDT_Float: RESAMPwT(float, float); break;
+    case AHTSE_UInt16: RESAMP(apr_uint16_t); break;
+    case AHTSE_Int16: RESAMP(apr_int16_t); break;
+    case AHTSE_UInt32: RESAMPwT(apr_uint32_t, apr_uint64_t); break;
+    case AHTSE_Int32: RESAMPwT(apr_int32_t, apr_int64_t); break;
+    case AHTSE_Float: RESAMPwT(float, float); break;
     default: // Byte
         RESAMP(apr_byte_t);
     }
@@ -647,7 +647,7 @@ static int handler(request_rec *r)
         return HTTP_NOT_MODIFIED;
 
     // Outgoing raw tile buffer
-    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * GDTGetSize(cfg->raster.datatype));
+    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * getTypeSize(cfg->raster.datatype));
     storage_manager raw;
     raw.size = static_cast<int>(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
     raw.buffer = static_cast<char *>(apr_palloc(r->pool, raw.size));
@@ -737,7 +737,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
 
     // Check some basic errors
     // In theory, we could alow the sign/unsigned to slip through
-    if (GDTGetSize(c->raster.datatype) != GDTGetSize(c->inraster.datatype))
+    if (getTypeSize(c->raster.datatype) != getTypeSize(c->inraster.datatype))
         return "Input datatype different from output";
 
     // Output mime type, defaults to jpeg
