@@ -21,6 +21,7 @@
 #include <http_log.h>
 #include <apr_strings.h>
 #include <vector>
+#include <cmath>
 
 extern module AP_MODULE_DECLARE_DATA retile_module;
 
@@ -112,14 +113,14 @@ static double wm2m(double eres, double y) {
 
 // reprojection codes
 typedef enum {
-    P_AFFINE = 0, P_GCS2WM, P_WM2GCS, P_WM2M, P_M2WM, P_COUNT
+    P_AFFINE = 0, P_GCS2WM, P_WM2GCS, P_WM2M, P_M2WM, P_GCS2M, P_M2GCS, P_COUNT
 } PCode;
 
 // Tables of reprojection code dependent functions, to dispatch on
 // Could be done with a switch, this is more compact and easier to extend
 // The order has to match the PCode definitions
-static coord_conv_f* cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj };
-static coord_conv_f* cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m };
+static coord_conv_f* cxf[P_COUNT] = { same_proj, wm2lon, lon2wm, same_proj, same_proj, m2lon, lon2m };
+static coord_conv_f* cyf[P_COUNT] = { same_proj, wm2lat, lat2wm, m2wm, wm2m, m2lat, lat2m };
 
 #define USER_AGENT "AHTSE Retile"
 

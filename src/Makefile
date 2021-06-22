@@ -14,8 +14,8 @@ LIBS = -L$(DEST) -lahtse -lstdc++
 
 # Create Makefile.lcl, which should define
 # MOD_PATH, the folder where the apache module should reside
-# INCLUDES, includes for httpd, apr headers
-# For example look at Makefile.lcl.example
+# EXTRA_INCLUDES, includes for httpd, apr headers
+# look at Makefile.lcl.example
 
 TARGET = .libs/$(MODULE).so
 
@@ -25,10 +25,10 @@ $(TARGET)       :       $(OBJECTS)
 	$(LIBTOOL) --mode=link g++ -o $(MODULE).la -rpath $(DEST) -module -avoid-version $^ $(LIBS)
 
 %.lo	:	%.cpp $(HEADERS)
-	$(LIBTOOL) --mode=compile g++ -std=c++0x $(CXXFLAGS) $(DEFINES) $(INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
+	$(LIBTOOL) --mode=compile g++ -std=c++11 $(CXXFLAGS) $(DEFINES) $(EXTRA_INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
 
 install : $(TARGET)
-	sudo cp $(TARGET) $(DEST)
+	$(SUDO) $(CP) $(TARGET) $(DEST)
 
 clean   :
-	rm -rf .libs *.o *.lo *.slo *.la
+	$(RM) -r .libs *.o *.lo *.slo *.la
