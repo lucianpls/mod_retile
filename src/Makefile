@@ -1,5 +1,7 @@
 MODULE = mod_retile
-include Makefile.lcl
+
+MAKEOPT ?= Makefile.lcl
+include $MAKEOPT
 
 C_SRC = $(MODULE).cpp
 HEADERS =
@@ -22,7 +24,7 @@ TARGET = .libs/$(MODULE).so
 # Can't use apxs to build c++ modules
 # The options used here might depend on how apache was built
 $(TARGET)       :       $(OBJECTS)
-	$(LIBTOOL) --mode=link g++ -o $(MODULE).la -rpath $(DEST) -module -avoid-version $^ $(LIBS)
+	$(LIBTOOL) --mode=link g++ -o $(MODULE).la -rpath $(LIBEXECDIR) -module -avoid-version $^ $(LIBS)
 
 %.lo	:	%.cpp $(HEADERS)
 	$(LIBTOOL) --mode=compile g++ -std=c++11 $(CXXFLAGS) $(DEFINES) $(EXTRA_INCLUDES) -pthread -c -o $@ $< && touch $(@:.lo=.slo)
