@@ -1,7 +1,7 @@
 MODULE = mod_retile
 
 MAKEOPT ?= Makefile.lcl
-include $MAKEOPT
+include $(MAKEOPT)
 
 C_SRC = $(MODULE).cpp
 HEADERS =
