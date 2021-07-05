@@ -30,6 +30,7 @@ APLOG_USE_MODULE(retile);
 #endif
 
 NS_AHTSE_USE
+NS_ICD_USE
 using namespace std;
 
 // C++ style, calculate pi once, instead of using the _USE_MATH_DEFINES 
@@ -176,9 +177,9 @@ struct work {
     // Input bounding box
     bbox_t in_bbox;
     // Output tile
-    sz out_tile;
+    sz5 out_tile;
     // Input tile range
-    sz tl, br;
+    sz5 tl, br;
     // Numerical ETag
     apr_uint64_t seed;
     int in_level;
@@ -204,10 +205,10 @@ static bool is_m(const char *projection) {
 }
 
 // If projection is the same, the transformation is an affine scaling
-#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
-#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
-#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
-#define IS_WM2M(cfg) (is_wm(cfg->inraster.projection) && is_m(cfg->raster.projection))
+#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection.c_str(), cfg->raster.projection.c_str()))
+#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection.c_str()) && is_wm(cfg->raster.projection.c_str()))
+#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection.c_str()) && is_gcs(cfg->raster.projection.c_str()))
+#define IS_WM2M(cfg) (is_wm(cfg->inraster.projection.c_str()) && is_m(cfg->raster.projection.c_str()))
 
 // Pick an input level based on desired output resolution
 static int pick_input_level(work &info, double rx, double ry) {
@@ -251,7 +252,7 @@ static int pick_input_level(work &info, double rx, double ry) {
 }
 
 // From a tile location, generate a bounding box of a raster
-static void tile_to_bbox(const TiledRaster &raster, const sz *tile, bbox_t &bb) {
+static void tile_to_bbox(const TiledRaster &raster, const sz5 *tile, bbox_t &bb) {
     double rx = raster.rsets[tile->l].rx;
     double ry = raster.rsets[tile->l].ry;
 
@@ -263,13 +264,13 @@ static void tile_to_bbox(const TiledRaster &raster, const sz *tile, bbox_t &bb) 
     bb.ymin = bb.ymax - ry * raster.pagesize.y;
 }
 
-static int ntiles(const sz &tl, const sz &br) {
+static int ntiles(const sz5 &tl, const sz5 &br) {
     return int((br.x - tl.x) * (br.y - tl.y));
 }
 
 // From a bounding box, calculate the top-left and bottom-right tiles of a specific level of a raster
 // Input level is absolute, the one set in output tiles is relative
-static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz &tl_tile, sz &br_tile) {
+static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz5 &tl_tile, sz5 &br_tile) {
     double rx = raster.rsets[level].rx;
     double ry = raster.rsets[level].ry;
     double x = (bb.xmin - raster.bbox.xmin) / (rx * raster.pagesize.x);
@@ -296,7 +297,7 @@ static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb,
 // Returns APR_SUCCESS if everything is fine, otherwise an HTTP error code
 static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
 {
-    const  sz& tl = info.tl, & br = info.br;
+    const sz5& tl = info.tl, &br = info.br;
     repro_conf* cfg = info.c;
     apr_uint64_t& etag_out = info.seed;
 
@@ -309,7 +310,7 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
     src.size = static_cast<int>(cfg->max_input_size);
     src.buffer = reinterpret_cast<char*>(apr_palloc(r->pool, src.size));
 
-    int pixel_size = getTypeSize(cfg->inraster.datatype);
+    size_t pixel_size = getTypeSize(cfg->inraster.dt);
 
     // inraster->pagesize.c has to be set correctly
     int input_line_width = int(cfg->inraster.pagesize.x * cfg->inraster.pagesize.c * pixel_size);
@@ -327,7 +328,7 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
         apr_pstrcat(r->pool, USER_AGENT ", ", user_agent, NULL);
 
     // Retrieve every required tile and decompress them in the right place
-    sz tile(tl);
+    sz5 tile(tl);
     for (tile.y = tl.y; tile.y < br.y; tile.y++) {
         for (tile.x = tl.x; tile.x < br.x; tile.x++) {
             char* sub_uri = tile_url(r->pool, cfg->source, tile, cfg->suffix);
@@ -354,10 +355,10 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
                 etag = src.size; // Start with the input tile size
                 // And pick some data out of the input buffer, towards the end
                 if (src.size > 50) {
-                    char* tptr = src.buffer + src.size - 24; // Temporary pointer
+                    char* tptr = static_cast<char *>(src.buffer) + src.size - 24; // Temporary pointer
                     tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
                     etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
-                    tptr = src.buffer + src.size - 35; // Temporary pointer
+                    tptr = static_cast<char *>(src.buffer) + src.size - 35; // Temporary pointer
                     tptr -= reinterpret_cast<apr_uint64_t>(tptr) % 8; // Make it 8 byte aligned
                     etag ^= *reinterpret_cast<apr_uint64_t*>(tptr);
                 }
@@ -425,7 +426,7 @@ static void adjust_itable(iline *table, int n, unsigned int max_avail) {
 // A 2D buffer
 struct interpolation_buffer {
     void *buffer;       // Location of first value per line
-    sz size;            // Describes the organization of the buffer
+    sz5 size;            // Describes the organization of the buffer
     int pixel_size;     // in bytes
 };
 
@@ -516,12 +517,12 @@ void resample(const repro_conf *cfg, const iline *h,
 #define RESAMP(T) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T>(src, dst, h, v)
 #define RESAMPwT(T, WT) if (cfg->nearNb) interpolateNN<T>(src, dst, h, v); else interpolate<T, WT>(src, dst, h, v)
     const iline *v = h + dst.size.x;
-    switch (cfg->raster.datatype) {
-    case AHTSE_UInt16: RESAMP(apr_uint16_t); break;
-    case AHTSE_Int16: RESAMP(apr_int16_t); break;
-    case AHTSE_UInt32: RESAMPwT(apr_uint32_t, apr_uint64_t); break;
-    case AHTSE_Int32: RESAMPwT(apr_int32_t, apr_int64_t); break;
-    case AHTSE_Float: RESAMPwT(float, float); break;
+    switch (cfg->raster.dt) {
+    case ICDT_UInt16: RESAMP(apr_uint16_t); break;
+    case ICDT_Int16: RESAMP(apr_int16_t); break;
+    case ICDT_UInt32: RESAMPwT(apr_uint32_t, apr_uint64_t); break;
+    case ICDT_Int32: RESAMPwT(apr_int32_t, apr_int64_t); break;
+    case ICDT_Float: RESAMPwT(float, float); break;
     default: // Byte
         RESAMP(apr_byte_t);
     }
@@ -580,10 +581,10 @@ static int handler(request_rec *r)
         !cfg->arr_rxp || !requestMatches(r, cfg->arr_rxp))
         return DECLINED;
 
-    work info;
+    work info = {0};
     info.c = cfg;
     info.seed = cfg->seed;
-    sz& tile = info.out_tile;
+    sz5& tile = info.out_tile;
     bbox_t& oebb = info.out_equiv_bbox;
     memset(&tile, 0, sizeof(tile));
 
@@ -648,7 +649,7 @@ static int handler(request_rec *r)
         return HTTP_NOT_MODIFIED;
 
     // Outgoing raw tile buffer
-    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * getTypeSize(cfg->raster.datatype));
+    int pixel_size = static_cast<int>(cfg->raster.pagesize.c * getTypeSize(cfg->raster.dt));
     storage_manager raw;
     raw.size = static_cast<int>(cfg->raster.pagesize.x * cfg->raster.pagesize.y * pixel_size);
     raw.buffer = static_cast<char *>(apr_palloc(r->pool, raw.size));
@@ -683,15 +684,13 @@ static int handler(request_rec *r)
     switch (cfg->raster.format) {
     case IMG_ANY:
     case IMG_JPEG: {
-        jpeg_params params;
-        set_jpeg_params(cfg->raster, &params);
+        jpeg_params params(cfg->raster);
         params.quality = static_cast<int>(cfg->quality);
         error_message = jpeg_encode(params, raw, dst);
     }
                      break;
     case IMG_PNG: {
-        png_params params;
-        set_png_params(cfg->raster, &params);
+        png_params params(cfg->raster);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
         if (cfg->has_transparency)
@@ -700,8 +699,7 @@ static int handler(request_rec *r)
     }
                 break;
     case IMG_LERC: {
-        lerc_params params;
-        set_lerc_params(cfg->raster, &params);
+        lerc_params params(cfg->raster);
         error_message = lerc_encode(params, raw, dst);
     }
                  break;
@@ -738,7 +736,7 @@ static const char *read_config(cmd_parms *cmd, repro_conf *c, const char *src, c
 
     // Check some basic errors
     // In theory, we could alow the sign/unsigned to slip through
-    if (getTypeSize(c->raster.datatype) != getTypeSize(c->inraster.datatype))
+    if (getTypeSize(c->raster.dt) != getTypeSize(c->inraster.dt))
         return "Input datatype different from output";
 
     // Output mime type, defaults to jpeg
