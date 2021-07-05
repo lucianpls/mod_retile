@@ -182,7 +182,7 @@ struct work {
     sz5 tl, br;
     // Numerical ETag
     apr_uint64_t seed;
-    int in_level;
+    size_t in_level;
 };
 
 // Is the projection GCS
@@ -211,10 +211,10 @@ static bool is_m(const char *projection) {
 #define IS_WM2M(cfg) (is_wm(cfg->inraster.projection.c_str()) && is_m(cfg->raster.projection.c_str()))
 
 // Pick an input level based on desired output resolution
-static int pick_input_level(work &info, double rx, double ry) {
+static size_t pick_input_level(work &info, double rx, double ry) {
     // The raster levels are in increasing resolution order, test until the best match, both x and y
-    int choiceX, choiceY;
-    int over = info.c->oversample;
+    size_t choiceX, choiceY;
+    size_t over = info.c->oversample;
 
     const TiledRaster &raster = info.c->inraster;
     for (choiceX = 0; choiceX < (raster.n_levels - 1); choiceX++) {
@@ -270,7 +270,7 @@ static int ntiles(const sz5 &tl, const sz5 &br) {
 
 // From a bounding box, calculate the top-left and bottom-right tiles of a specific level of a raster
 // Input level is absolute, the one set in output tiles is relative
-static void bbox_to_tile(const TiledRaster &raster, int level, const bbox_t &bb, sz5 &tl_tile, sz5 &br_tile) {
+static void bbox_to_tile(const TiledRaster &raster, size_t level, const bbox_t &bb, sz5 &tl_tile, sz5 &br_tile) {
     double rx = raster.rsets[level].rx;
     double ry = raster.rsets[level].ry;
     double x = (bb.xmin - raster.bbox.xmin) / (rx * raster.pagesize.x);
@@ -615,7 +615,7 @@ static int handler(request_rec *r)
         return sendEmptyTile(r, cfg->raster.missing);
 
     // Pick the input level
-    int input_l = pick_input_level(info, out_equiv_rx, out_equiv_ry);
+    size_t input_l = pick_input_level(info, out_equiv_rx, out_equiv_ry);
     bbox_to_tile(cfg->inraster, input_l, oebb, info.tl, info.br);
 
     info.tl.z = info.br.z = info.out_tile.z;
