@@ -435,7 +435,7 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     const interpolation_buffer &src, interpolation_buffer &dst,
     const iline *h, const iline *v)
 {
-    const int colors = static_cast<int>(dst.size.c);
+    const auto colors = dst.size.c;
     ap_assert(src.size.c == colors); // Same number of colors
     T *data = reinterpret_cast<T *>(dst.buffer);
     T *s = reinterpret_cast<T *>(src.buffer);
@@ -443,11 +443,11 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
 
     // single band optimization
     if (1 == colors) {
-        for (int y = 0; y < dst.size.y; y++) {
+        for (size_t y = 0; y < dst.size.y; y++) {
             const WT vw = static_cast<WT>(v[y].w);
-            for (int x = 0; x < dst.size.x; x++) {
+            for (size_t x = 0; x < dst.size.x; x++) {
                 const WT hw = static_cast<WT>(h[x].w);
-                const int idx = slw * v[y].line + h[x].line; // high left index
+                const size_t idx = slw * v[y].line + h[x].line; // high left index
                 const WT lo = static_cast<WT>(s[idx - slw - 1]) * (256 - hw)
                     + static_cast<WT>(s[idx - slw]) * hw;
                 const WT hi = static_cast<WT>(s[idx - 1]) * (256 - hw)
@@ -460,12 +460,12 @@ template<typename T = apr_byte_t, typename WT = apr_int32_t> static void interpo
     }
 
     // More than one band
-    for (int y = 0; y < dst.size.y; y++) {
+    for (size_t y = 0; y < dst.size.y; y++) {
         const WT vw = static_cast<WT>(v[y].w);
-        for (int x = 0; x < dst.size.x; x++) {
+        for (size_t x = 0; x < dst.size.x; x++) {
             const WT hw = static_cast<WT>(h[x].w);
-            int idx = slw * v[y].line + h[x].line * colors; // high left index
-            for (int c = 0; c < colors; c++, idx++) {
+            size_t idx = slw * v[y].line + h[x].line * colors; // high left index
+            for (size_t c = 0; c < colors; c++, idx++) {
                 const WT lo = static_cast<WT>(s[idx - slw]) * hw +
                     static_cast<WT>(s[idx - slw - colors]) * (256 - hw);
                 const WT hi = static_cast<WT>(s[idx]) * hw +
