@@ -12,8 +12,6 @@ OBJECTS = $(FILES:.cpp=.lo)
 CXXFLAGS = -prefer-pic -O2 -Wall
 DEFINES = -DLINUX -D_REENTRANT -D_GNU_SOURCE $(DEBUG)
 
-LIBS = -L$(DEST) -lahtse -lstdc++
-
 # Create Makefile.lcl, which should define
 # MOD_PATH, the folder where the apache module should reside
 # EXTRA_INCLUDES, includes for httpd, apr headers
