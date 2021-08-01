@@ -7,7 +7,6 @@
  */
 
 // TODO: Improve endianess support
-// TODO: Add LERC support, via libahtse
 // TODO: Allow overlap between tiles
 
 #include <ahtse.h>
@@ -205,10 +204,10 @@ static bool is_m(const char *projection) {
 }
 
 // If projection is the same, the transformation is an affine scaling
-#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection.c_str(), cfg->raster.projection.c_str()))
-#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection.c_str()) && is_wm(cfg->raster.projection.c_str()))
-#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection.c_str()) && is_gcs(cfg->raster.projection.c_str()))
-#define IS_WM2M(cfg) (is_wm(cfg->inraster.projection.c_str()) && is_m(cfg->raster.projection.c_str()))
+#define IS_AFFINE_SCALING(cfg) (!apr_strnatcasecmp(cfg->inraster.projection, cfg->raster.projection))
+#define IS_GCS2WM(cfg) (is_gcs(cfg->inraster.projection) && is_wm(cfg->raster.projection))
+#define IS_WM2GCS(cfg) (is_wm(cfg->inraster.projection) && is_gcs(cfg->raster.projection))
+#define IS_WM2M(cfg) (is_wm(cfg->inraster.projection) && is_m(cfg->raster.projection))
 
 // Pick an input level based on desired output resolution
 static size_t pick_input_level(work &info, double rx, double ry) {
@@ -329,6 +328,14 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
 
     // Retrieve every required tile and decompress them in the right place
     sz5 tile(tl);
+
+    // Set expected values for decoder
+    codec_params params(cfg->inraster);
+    // Expected input raster is a single tile
+    params.raster.size = cfg->inraster.pagesize;
+    // overwrite the line stride
+    params.line_stride = int((br.x - tl.x) * input_line_width);
+
     for (tile.y = tl.y; tile.y < br.y; tile.y++) {
         for (tile.x = tl.x; tile.x < br.x; tile.x++) {
             char* sub_uri = tile_url(r->pool, cfg->source, tile, cfg->suffix);
@@ -366,10 +373,6 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
             // Build up the outgoing ETag
             etag_out = (etag_out << 8) | (0xff & (etag_out >> 56)); // Rotate existing tag
             etag_out ^= etag; // And combine it with the incoming tile etag
-
-            // Set expected values for decoder
-            codec_params params(cfg->inraster);
-            params.line_stride = int((br.x - tl.x) * input_line_width);
 
             // Location of first byte of this input tile
             void* b = (char*)(*buffer) + pagesize * (tile.y - tl.y) * (br.x - tl.x)
@@ -561,8 +564,10 @@ static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
 static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
     FILE* f = fopen(filen, "wb");
     if (!f) return;
-    if (b.pixel_size < 3)
+    if (b.size.c == 1)
         fprintf(f, "P5 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size == 1 ? 255 : 65535);
+    else
+        fprintf(f, "P6 %d %d %d\n", int(b.size.x), int(b.size.y), b.pixel_size/b.size.c == 1 ? 255 : 65535);
     fwrite(b.buffer, b.size.x * b.pixel_size, b.size.y, f);
     fclose(f);
 }
@@ -681,16 +686,20 @@ static int handler(request_rec *r)
 
     // This is fragile
     // TODO: Implement output image selection in libahtse
+
+    // Output a single tile
+    TiledRaster outraster = cfg->raster;
+    outraster.size = outraster.pagesize;
     switch (cfg->raster.format) {
     case IMG_ANY:
     case IMG_JPEG: {
-        jpeg_params params(cfg->raster);
+        jpeg_params params(outraster);
         params.quality = static_cast<int>(cfg->quality);
         error_message = jpeg_encode(params, raw, dst);
     }
                      break;
     case IMG_PNG: {
-        png_params params(cfg->raster);
+        png_params params(outraster);
         if (cfg->quality < 10) // Otherwise use the default of 6
             params.compression_level = static_cast<int>(cfg->quality);
         if (cfg->has_transparency)
@@ -699,7 +708,7 @@ static int handler(request_rec *r)
     }
                 break;
     case IMG_LERC: {
-        lerc_params params(cfg->raster);
+        lerc_params params(outraster);
         error_message = lerc_encode(params, raw, dst);
     }
                  break;
