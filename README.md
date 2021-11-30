@@ -1,6 +1,6 @@
-# mod_reproject
+# mod_reproject [AHTSE](https://github.com/lucianpls/AHTSE)
 
-An apache module that converts a geospatial tile service from one projection and tiling grid to another
+An apache module that converts an AHTSE tile service from one projection or tiling grid to another
 
 # Building
 
@@ -24,6 +24,15 @@ Can be present more than once, one of the existing regular expressions has to ma
 ## Reproject_ConfigurationFiles source_configuration_file configuration_file
 The first file contains the source raster information, while the second the desired configuration for the output 
 
+## Reproject_Source string
+Required, the source path, up to the numerical arguments, as a local web path suitable for a subrequest
+
+## Reproject_Postfix string
+Optional, gets appended to the source URL tile requests, after the tile address
+
+## Reproject On
+Optional, should be the last reproject directive.  When set it checks the configuration for sanity
+
 # Directives in both source and reproject configuration files
 
 ## Size X Y Z C
@@ -32,25 +41,25 @@ The first file contains the source raster information, while the second the desi
 ## PageSize X Y 1 C
   - Optional, the pagesize in pixels, in both files, defaults to 512x512
 
-## Projection prj
-  - Optional, WM and GCS are recognized.
-
+## Projection string
+  - Optional, in which case the bounding box has to be correct
+  -- GCS, WGS84, EPSG:4326
+  -- WM, EPSG:3857, EPSG:3785
+  -- Mercator, EPSG:3395
+  
 ## DataType type
   - Required if not unsigned byte.  Valid values are Byte, Int16, UInt16, Int32, UInt32.  Case insensitive
-
+ 
 ## SkippedLevels N
   - Optional, defaults to 0, counted from the top of the pyramid, in both files
 
 ## BoundingBox xmin,ymin,xmax,ymax
   - Optional, WMS style bounding box, defaults to 0 to 1 in both x and y.  Floating point using decimal dot format, comma separated
+  
+## ETagSeed base32_value
+  - A base32 64bit number, to be used as a seed for ETag generation
 
-# Directives only in the reproject configuration file
-
-## SourcePath filepath
-  - Mandatory, the location of the tile source, up to the numerical arguments, as a local web path suitable for a subrequest
-
-## SourcePostfix string
-  - Optional, a literal string that gets appended to the source URL tile requests
+# Directives valid only in the reproject configuration file
 
 ## EmptyTile size offset filename
   - Size is required, Offset defaults to zero and filename defaults to sourcepath
@@ -58,17 +67,14 @@ The first file contains the source raster information, while the second the desi
 ## MimeType mtype
   - Output mime type, defaults to input format.  image/jpeg or image/png.  If specified, forces the output type
 
-## ETagSeed value
-  - A base32 64bit number, to be used as a seed for ETag generation
-
 ## InputBufferSize size
-  - Default is 1MB, should be larger than the maximum expected input tile size
+  - Buffer for one input tile, default is 1MB, should be larger than the maximum expected input tile size
 
 ## OutputBufferSize size
-  - Default is 1MB, should be larger than the maximum expected output tile size
+  - Buffer for out output tile, default is 1MB, should be larger than the maximum expected output tile size
 
-## Quality Q
-  - A floating point figure, format dependent.  Default for JPEG is 75.  Default for PNG is 6
+## Quality value
+  - A floating point value, controls the output format features, it is format dependent.  Default for JPEG is 75.  Default for PNG is 6
 
 ## Oversample On
   - If on and the output resolution falls between two available input resolution levels, the lower resolution input will be chosen instead of the higher one
@@ -82,6 +88,8 @@ The first file contains the source raster information, while the second the desi
 ## Radius value
   - The planet radius in meters.  Used in reprojection calculations. Defaults to earth major radius
 
-# Ways to use
+## Transparent On
+  - If set, the 0 value pixels in the output will be set as transparent (PNG only)
 
+# Ways to use
 If the input and output size and alignment match, it can be used to change quality or the format
