@@ -558,7 +558,7 @@ static void prep_y(work &info, iline *table, coord_conv_f coord_f) {
     }
 }
 
-#if defined(_DEBUG)
+#if defined(DEBUG)
 static void DEBUG_dump_interpolation_buffer(const interpolation_buffer &b, const char* filen) {
     FILE* f = fopen(filen, "wb");
     if (!f) return;
