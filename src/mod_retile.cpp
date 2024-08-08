@@ -300,7 +300,7 @@ static apr_status_t retrieve_source(request_rec* r, work& info, void** buffer)
 
     // a reasonable number of input tiles, 64 is a good figure
     int nt = ntiles(tl, br);
-    SERVER_ERR_IF(nt > 6, r, "Too many input tiles required, maximum is 64");
+    SERVER_ERR_IF(nt > 64, r, "Too many input tiles required, maximum is 64");
 
     // Allocate a buffer for receiving responses, gets reused
     storage_manager src;
